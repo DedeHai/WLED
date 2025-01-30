@@ -192,7 +192,7 @@ public:
   void setColorByAge(const bool enable);
   void setMotionBlur(const uint8_t bluramount); // note: motion blur can only be used if 'particlesize' is set to zero
   void setSmearBlur(const uint8_t bluramount); // enable 2D smeared blurring of full frame
-  void setParticleSize(const uint8_t size);
+  void setParticleSize(const uint8_t size); // 0 = 1 pixel, 1 = 2x2 pixels, 255 = 10x10 pixels. Note: advanced (individual) size rendering does not work on size = 0
   void setGravity(const int8_t force = 8);
   void enableParticleCollisions(const bool enable, const uint8_t hardness = 255);
 

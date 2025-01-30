@@ -165,7 +165,7 @@ void ParticleSystem2D::setSmearBlur(uint8_t bluramount) {
 }
 
 
-// render size using smearing (see blur function)
+// render size: 0: 1 pixel, 1: 2x2 pixels, larger uses 2D blur. Note: advanced size rendering is skipped if size is set to 0
 void ParticleSystem2D::setParticleSize(uint8_t size) {
   particlesize = size;
   particleHardRadius = PS_P_MINHARDRADIUS;
@@ -677,7 +677,7 @@ void ParticleSystem2D::ParticleSys_render() {
 
 // calculate pixel positions and brightness distribution and render the particle to local buffer or global buffer
 void ParticleSystem2D::renderParticle(const uint32_t particleindex, const uint32_t brightness, const CRGB& color, const bool wrapX, const bool wrapY) {
-  if(particlesize == 0 && !advPartProps) { // single pixel rendering
+  if (particlesize == 0) { // single pixel rendering
     uint32_t x = particles[particleindex].x >> PS_P_RADIUS_SHIFT;
     uint32_t y = particles[particleindex].y >> PS_P_RADIUS_SHIFT;
     if (x <= (uint32_t)maxXpixel && y <= (uint32_t)maxYpixel) {
@@ -947,7 +947,7 @@ void ParticleSystem2D::collideParticles(PSparticle &particle1, PSparticle &parti
     particle2.vx -= ximpulse;
     particle2.vy -= yimpulse;
 
-    if (collisionHardness < surfacehardness && (SEGMENT.call & 0x03) == 0) { // if particles are soft, they become 'sticky' i.e. apply some friction (they do pile more nicely and stop sloshing around)
+    if (collisionHardness < surfacehardness && (SEGMENT.call & 0x01) == 0) { // if particles are soft, they become 'sticky' i.e. apply some friction (they do pile more nicely and stop sloshing around)
       const uint32_t coeff = collisionHardness + (255 - PS_P_MINSURFACEHARDNESS);  // Note: could call applyFriction, but this is faster and speed is key here
       particle1.vx = ((int32_t)particle1.vx * coeff) / 255;
       particle1.vy = ((int32_t)particle1.vy * coeff) / 255;

@@ -8116,8 +8116,8 @@ uint16_t mode_particlepit(void) {
         PartSys->particles[i].sat = ((SEGMENT.custom3) << 3) + 7;
         // set particle size
         if (SEGMENT.custom1 == 255) {
-          PartSys->setParticleSize(0); // set global size to zero
-          PartSys->advPartProps[i].size =hw_random16(SEGMENT.custom1); // set each particle to random size
+          PartSys->setParticleSize(1); // set global size to 2x2 pixels (must be set to >0 needed for individual size rendering)
+          PartSys->advPartProps[i].size = hw_random16(SEGMENT.custom1); // set each particle to random size
         } else {
           PartSys->setParticleSize(SEGMENT.custom1); // set global size
           PartSys->advPartProps[i].size = 0; // use global size
@@ -8478,6 +8478,7 @@ static const char _data_FX_MODE_PARTICLEIMPACT[] PROGMEM = "PS Impact@Launches,!
   Uses palette for particle color
   by DedeHai (Damian Schneider)
 */
+/*
 uint16_t mode_particleattractor(void) {
   ParticleSystem2D *PartSys = nullptr;
   PSsettings2D sourcesettings;
@@ -8500,12 +8501,9 @@ uint16_t mode_particleattractor(void) {
     PartSys->sources[0].minLife = 50;
     #endif
     PartSys->sources[0].var = 4; // emiting variation
-    PartSys->setWallHardness(255);  //bounce forever
-    PartSys->setWallRoughness(200); //randomize wall bounce
   }
-  else {
+  else
     PartSys = reinterpret_cast<ParticleSystem2D *>(SEGENV.data); // if not first call, just set the pointer to the PS
-  }
 
   if (PartSys == nullptr)
     return mode_static(); // something went wrong, no data!
@@ -8568,6 +8566,137 @@ uint16_t mode_particleattractor(void) {
   return FRAMETIME;
 }
 static const char _data_FX_MODE_PARTICLEATTRACTOR[] PROGMEM = "PS Attractor@Mass,Particles,Size,Collide,Friction,AgeColor,Move,Swallow;;!;2;pal=9,sx=100,ix=82,c1=0,c2=0";
+*/
+
+uint16_t mode_particleattractor(void) {
+  constexpr uint32_t NUMBEROFATTRACTORS = 100;
+  ParticleSystem2D *PartSys = nullptr;
+  static PSparticleFlags attractorFlags[NUMBEROFATTRACTORS]; // particle flags for the attractors
+  static PSparticle attractors[NUMBEROFATTRACTORS]; // particle pointer to the attractors
+  if (SEGMENT.call == 0) { // initialization
+    if (!initParticleSystem2D(PartSys, 0, sizeof(PSparticle) * NUMBEROFATTRACTORS + sizeof(PSparticleFlags) * NUMBEROFATTRACTORS, true)) // init using advanced particle settings
+      return mode_static(); // allocation failed or not 2D
+    PartSys->setWallHardness(250); 
+    //PartSys->setWallRoughness(200); //randomize wall bounce
+    
+    PartSys->setGravity(4); // set gravity force
+    PartSys->setBounceX(true);
+    PartSys->setBounceY(true);
+    //PartSys->setGravity(0); // disable global gravity
+  }
+  else {
+    PartSys = reinterpret_cast<ParticleSystem2D *>(SEGENV.data); // if not first call, just set the pointer to the PS
+  }
+
+  if (PartSys == nullptr)
+    return mode_static(); // something went wrong, no data!
+
+  // Particle System settings
+  PartSys->updateSystem(); // update system properties (dimensions and data pointers)
+  //attractors = reinterpret_cast<PSparticle*>(PartSys->PSdataEnd);
+  //attractorFlags = reinterpret_cast<PSparticleFlags*>(attractors + NUMBEROFATTRACTORS);
+  PartSys->setParticleSize(0);//SEGMENT.custom1); //set size globally
+  PartSys->setUsedParticles(100);//SEGMENT.intensity);
+  PartSys->enableParticleCollisions(true, 220);//SEGMENT.custom2);
+  
+  int seconds = second(localTime);
+
+  // initialize new state
+ // if ((SEGMENT.call % 900) == 0) {
+    // explode current particles at random
+    /*
+    unsigned exforce = hw_random16(60); 
+    for (uint32_t i = 0; i < SEGENV.aux1; i++) {
+      unsigned partidx = (SEGENV.aux0 + i) % PartSys->usedParticles;
+      PartSys->particles[partidx].vx = -(exforce >> 1) + hw_random16(exforce); // pin captured particles
+      PartSys->particles[partidx].vy = -(exforce >> 1) + hw_random16(exforce);
+    }*/
+
+    // draw text, read pixel position, delete text
+    uint32_t bgColor = SEGCOLOR(1);
+    SEGMENT.fill(bgColor); // clear
+    mode_2Dscrollingtext();
+    uint32_t pxlcount = 0;
+   // SEGENV.aux0 = hw_random16(); // new particle index offset
+    //reset particles
+    for (uint32_t i = 0; i < PartSys->usedParticles; i++) {
+      PartSys->particleFlags[i].custom1 = false; // reset attractor flag
+      PartSys->particleFlags[i].collide = true;
+      //PartSys->particles[i].hue = hw_random16();
+    }
+    
+    for (int x = 0; x <= PartSys->maxXpixel; x++) {
+      for (int y = 0; y <= PartSys->maxYpixel; y++) { // Change this to only loop letter height rows at some point
+        if (SEGMENT.getPixelColorXY(x, y) != bgColor) {
+          if(pxlcount >= NUMBEROFATTRACTORS) break; // prevent overflow
+          attractors[pxlcount].x = 32 + (x << PS_P_RADIUS_SHIFT);  // set to center of pixels
+          attractors[pxlcount].y = 32 + ((PartSys->maxYpixel - y) << PS_P_RADIUS_SHIFT); // y axis is inverted in particle system
+          PartSys->particles[(SEGENV.aux0 + pxlcount) % PartSys->usedParticles].hue = (y << 2) + (x << 3); // color by position
+          //PartSys->particles[(SEGENV.aux0 + pxlcount) % PartSys->usedParticles].ttl = 200; // color by position
+          pxlcount++;
+          SEGMENT.setPixelColorXY(x, y, bgColor); // reset color
+        }
+      }
+   // }
+    SEGENV.aux1 = pxlcount;
+
+    /*
+    // random position test
+    for (uint32_t i = 0; i < NUMBEROFATTRACTORS; i++) { // set to center of pixels
+      attractors[i].x = 32 + (hw_random16(PartSys->maxXpixel) << PS_P_RADIUS_SHIFT); 
+      attractors[i].y = 32 + (((PartSys->maxYpixel >> 1) + hw_random16(PartSys->maxYpixel >> 1)) << PS_P_RADIUS_SHIFT); 
+    }*/
+  }
+
+  for (uint32_t i = 0; i < PartSys->usedParticles; i++) {
+    if (PartSys->particles[i].ttl == 0) {
+      //PartSys->particles[i].hue = 100;
+      PartSys->particles[i].ttl = 20;
+      PartSys->particles[i].x = hw_random16(PartSys->maxX);
+      PartSys->particles[i].y = hw_random16(PartSys->maxY);
+      PartSys->particleFlags[i].collide = true; // all particles colllide
+      PartSys->particleFlags[i].perpetual = true; // never die
+    }
+   // if (!PartSys->particleFlags[i].custom1)
+    //  PartSys->applyGravity(PartSys->particles[i]); // apply gravity to non-attracted particles
+  }
+
+
+  // apply force
+ // if ((SEGMENT.call % 900) > 200) { // pause after init: drops particles, then attracts new ones
+    uint32_t strength = SEGMENT.speed;
+    for (uint32_t i = 0; i < SEGENV.aux1; i++) {
+      unsigned partidx = (SEGENV.aux0 + i) % PartSys->usedParticles;
+      PartSys->pointAttractor(partidx, attractors[i], strength, false);
+      PartSys->particleFlags[partidx].custom1 = true;
+      PartSys->particleFlags[partidx].collide = false;
+      // move particles towards attractor, pull harder if further away
+      int32_t dx = attractors[i].x - PartSys->particles[partidx].x;
+      int32_t dy = attractors[i].y - PartSys->particles[partidx].y;
+      int32_t distance = abs(dx) + abs(dy);
+      if(distance < 32) {
+        PartSys->particles[partidx].x = attractors[i].x; // pin captured particles
+        PartSys->particles[partidx].y = attractors[i].y;
+        //PartSys->particles[partidx].hue = 0; // mark pinend
+      }
+      else {
+        int32_t force = SEGMENT.speed >> 1;
+        int8_t xforce = (force * dx) / (distance);
+        int8_t yforce = (force * dy) / (distance);
+        PartSys->applyForce(partidx, xforce, yforce);
+      }
+      PartSys->applyFriction(PartSys->particles[partidx], 2); // reduce oscillations
+    }
+//  }
+
+  if ((SEGMENT.call & 15) == 0) // calm things down a bit
+    PartSys->applyFriction(1);
+
+  PartSys->update(); // update and render
+  return FRAMETIME;
+}
+//static const char _data_FX_MODE_PARTICLEATTRACTOR[] PROGMEM = "PS Attractor@Mass,Particles,Size,Collide,Friction,AgeColor,Move,Swallow;;!;2;pal=9,sx=100,ix=82,c1=0,c2=0";
+static const char _data_FX_MODE_PARTICLEATTRACTOR[] PROGMEM = "PS Attractor@!,Y Offset,Trail,Font size,,Gradient,Overlay;!,!,Gradient;!;2;ix=128,c1=0,rev=0,mi=0,rY=0,mY=0";
 
 /*
   Particle Spray, just a particle spray with many parameters
@@ -8896,7 +9025,6 @@ uint16_t mode_particleblobs(void) {
     PartSys->setWallHardness(255);
     PartSys->setWallRoughness(255);
     PartSys->setCollisionHardness(255);
-    //PartSys->setParticleSize(0); //set global size to zero or motion blur cannot be used (is zero by default)
   }
   else
     PartSys = reinterpret_cast<ParticleSystem2D *>(SEGENV.data); // if not first call, just set the pointer to the PS
