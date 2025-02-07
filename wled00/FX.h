@@ -931,6 +931,7 @@ class WS2812FX {  // 96 bytes
 
     unsigned long now, timebase;
     uint32_t getPixelColor(unsigned i) const;
+    uint32_t getRenderedPixelXY(uint8_t segid, unsigned x, unsigned y = 0) const;
 
     inline uint32_t getLastShow() const   { return _lastShow; }           // returns millis() timestamp of last strip.show() call
 
