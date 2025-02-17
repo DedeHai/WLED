@@ -254,6 +254,10 @@
   #include "../usermods/usermod_v2_brightness_follow_sun/usermod_v2_brightness_follow_sun.h"
 #endif
 
+#ifdef USERMOD_LIGHT_SLEEP
+  #include "../usermods/light_sleep/usermod_light_sleep.h"
+#endif
+
 void registerUsermods()
 {
 /*
@@ -493,5 +497,9 @@ void registerUsermods()
 
   #ifdef USERMOD_BRIGHTNESS_FOLLOW_SUN
   UsermodManager::add(new UsermodBrightnessFollowSun());
+  #endif
+
+  #ifdef USERMOD_LIGHT_SLEEP
+  UsermodManager::add(new LightSleepUsermod());
   #endif
 }
