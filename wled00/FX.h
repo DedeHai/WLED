@@ -224,16 +224,16 @@ extern byte realtimeMode;           // used in getMappedPixelIndex()
 #define FX_MODE_EXPLODING_FIREWORKS     90
 #define FX_MODE_BOUNCINGBALLS           91
 #define FX_MODE_SINELON                 92
-#define FX_MODE_SINELON_DUAL            93 // !!! candidate for removal 
-#define FX_MODE_SINELON_RAINBOW         94// !!! candidate for removal 
+//#define FX_MODE_SINELON_DUAL          93 // removed in 0.16, use Sinelon with with check 2
+//#define FX_MODE_SINELON_RAINBOW       94 // removed in 0.16, use Sinelon with with check 1
 #define FX_MODE_POPCORN                 95
 #define FX_MODE_DRIP                    96
 #define FX_MODE_PLASMA                  97
 #define FX_MODE_PERCENT                 98
-#define FX_MODE_RIPPLE_RAINBOW          99 // !!! candidate for removal 
+//#define FX_MODE_RIPPLE_RAINBOW        99 // removed in 0.16, use Ripple with with check 1
 #define FX_MODE_HEARTBEAT              100
 #define FX_MODE_PACIFICA               101
-#define FX_MODE_CANDLE_MULTI           102 // !!! candidate for removal 
+#define FX_MODE_CANDLE_MULTI           102 // removed in 0.16, use Candle with with check 2
 #define FX_MODE_SOLID_GLITTER          103  // candidate for removal (use glitter) // !!! candidate for removal 
 #define FX_MODE_SUNRISE                104
 #define FX_MODE_PHASED                 105

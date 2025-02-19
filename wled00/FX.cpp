@@ -2415,7 +2415,8 @@ typedef struct Ripple {
 #else
   #define MAX_RIPPLES  100
 #endif
-static uint16_t ripple_base(uint8_t blurAmount = 0) {
+uint16_t mode_ripple() {
+  if (SEGLEN <= 1) return mode_static();
   unsigned maxRipples = min(1 + (int)(SEGLEN >> 2), MAX_RIPPLES);  // 56 max for 16 segment ESP8266
   unsigned dataSize = sizeof(ripple) * maxRipples;
 
@@ -2423,6 +2424,24 @@ static uint16_t ripple_base(uint8_t blurAmount = 0) {
 
   Ripple* ripples = reinterpret_cast<Ripple*>(SEGENV.data);
 
+  if(SEGMENT.check1) { // ripple rainbow mode
+    if (SEGENV.call == 0) {
+      SEGENV.aux0 = SEGENV.aux1 = hw_random8();
+    }
+    if (SEGENV.aux0 == SEGENV.aux1)
+      SEGENV.aux1 = hw_random8();
+    else if (SEGENV.aux1 > SEGENV.aux0)
+      SEGENV.aux0++;
+    else
+      SEGENV.aux0--;
+    SEGMENT.fill(color_blend(SEGMENT.color_wheel(SEGENV.aux0),BLACK,uint8_t(235)));
+  }
+  else { // standard ripple mode
+    if(SEGMENT.custom1 || SEGMENT.check2) // blur or overlay
+      SEGMENT.fade_out(250);
+    else
+      SEGMENT.fill(SEGCOLOR(1));
+  }
   //draw wave
   for (unsigned i = 0; i < maxRipples; i++) {
     unsigned ripplestate = ripples[i].state;
@@ -2463,41 +2482,11 @@ static uint16_t ripple_base(uint8_t blurAmount = 0) {
       }
     }
   }
-  SEGMENT.blur(blurAmount);
+  SEGMENT.blur(SEGMENT.custom1>>1);
   return FRAMETIME;
 }
+static const char _data_FX_MODE_RIPPLE[] PROGMEM = "Ripple@!,Waves,Blur,,,Rainbow,Overlay;,!;!;12;c1=0";
 #undef MAX_RIPPLES
-
-
-uint16_t mode_ripple(void) {
-  if (SEGLEN <= 1) return mode_static();
-  if(SEGMENT.custom1 || SEGMENT.check2) // blur or overlay
-    SEGMENT.fade_out(250);
-  else
-    SEGMENT.fill(SEGCOLOR(1));
-
-  return ripple_base(SEGMENT.custom1>>1);
-}
-static const char _data_FX_MODE_RIPPLE[] PROGMEM = "Ripple@!,Wave #,Blur,,,,Overlay;,!;!;12;c1=0";
-
-
-uint16_t mode_ripple_rainbow(void) {
-  if (SEGLEN <= 1) return mode_static();
-  if (SEGENV.call ==0) {
-    SEGENV.aux0 = hw_random8();
-    SEGENV.aux1 = hw_random8();
-  }
-  if (SEGENV.aux0 == SEGENV.aux1) {
-    SEGENV.aux1 = hw_random8();
-  } else if (SEGENV.aux1 > SEGENV.aux0) {
-    SEGENV.aux0++;
-  } else {
-    SEGENV.aux0--;
-  }
-  SEGMENT.fill(color_blend(SEGMENT.color_wheel(SEGENV.aux0),BLACK,uint8_t(235)));
-  return ripple_base();
-}
-static const char _data_FX_MODE_RIPPLE_RAINBOW[] PROGMEM = "Ripple Rainbow@!,Wave #;;!;12";
 
 
 //  TwinkleFOX by Mark Kriegsman: https://gist.github.com/kriegsman/756ea6dcae8e30845b5a
@@ -3078,13 +3067,15 @@ static const char _data_FX_MODE_ROLLINGBALLS[] PROGMEM = "Rolling Balls@!,# of b
 /*
 * Sinelon stolen from FASTLED examples
 */
-static uint16_t sinelon_base(bool dual, bool rainbow=false) {
+static uint16_t mode_sinelon(void) {
   if (SEGLEN <= 1) return mode_static();
   SEGMENT.fade_out(SEGMENT.intensity);
   unsigned pos = beatsin16_t(SEGMENT.speed/10,0,SEGLEN-1);
   if (SEGENV.call == 0) SEGENV.aux0 = pos;
   uint32_t color1 = SEGMENT.color_from_palette(pos, true, false, 0);
   uint32_t color2 = SEGCOLOR(2);
+  bool rainbow = SEGMENT.check1;
+  bool dual    = SEGMENT.check2;
   if (rainbow) {
     color1 = SEGMENT.color_wheel((pos & 0x07) * 32);
   }
@@ -3111,24 +3102,8 @@ static uint16_t sinelon_base(bool dual, bool rainbow=false) {
 
   return FRAMETIME;
 }
+static const char _data_FX_MODE_SINELON[] PROGMEM = "Sinelon@!,Trail,,,,Rainbow,Dual;!,!,!;!";
 
-
-uint16_t mode_sinelon(void) {
-  return sinelon_base(false);
-}
-static const char _data_FX_MODE_SINELON[] PROGMEM = "Sinelon@!,Trail;!,!,!;!";
-
-
-uint16_t mode_sinelon_dual(void) {
-  return sinelon_base(true);
-}
-static const char _data_FX_MODE_SINELON_DUAL[] PROGMEM = "Sinelon Dual@!,Trail;!,!,!;!";
-
-
-uint16_t mode_sinelon_rainbow(void) {
-  return sinelon_base(false, true);
-}
-static const char _data_FX_MODE_SINELON_RAINBOW[] PROGMEM = "Sinelon Rainbow@!,Trail;,,!;!";
 
 
 // utility function that will add random glitter to SEGMENT
@@ -3249,12 +3224,12 @@ static const char _data_FX_MODE_POPCORN[] PROGMEM = "Popcorn@!,!,,,,,Overlay;!,!
 //Inspired by https://github.com/avanhanegem/ArduinoCandleEffectNeoPixel
 //and https://cpldcpu.wordpress.com/2016/01/05/reverse-engineering-a-real-candle/
 
-uint16_t candle(bool multi)
+uint16_t mode_candle()
 {
-  if (multi && SEGLEN > 1) {
+  if (SEGLEN > 1) {
     //allocate segment data
-    unsigned dataSize = max(1, (int)SEGLEN -1) *3; //max. 1365 pixels (ESP8266)
-    if (!SEGENV.allocateData(dataSize)) return candle(false); //allocation failed
+    unsigned dataSize = max(1, (int)SEGLEN -1) * 3; //max. 1365 pixels (ESP8266)
+    if (!SEGENV.allocateData(dataSize)) return mode_static(); //allocation failed
   }
 
   //max. flicker range controlled by intensity
@@ -3271,7 +3246,7 @@ uint16_t candle(bool multi)
     speedFactor = 3;
   } //else 4 (slowest)
 
-  unsigned numCandles = (multi) ? SEGLEN : 1;
+  unsigned numCandles = SEGMENT.check2 ? SEGLEN : 1;
 
   for (unsigned i = 0; i < numCandles; i++)
   {
@@ -3322,20 +3297,7 @@ uint16_t candle(bool multi)
 
   return FRAMETIME_FIXED;
 }
-
-
-uint16_t mode_candle()
-{
-  return candle(false);
-}
-static const char _data_FX_MODE_CANDLE[] PROGMEM = "Candle@!,!;!,!;!;01;sx=96,ix=224,pal=0";
-
-
-uint16_t mode_candle_multi()
-{
-  return candle(true);
-}
-static const char _data_FX_MODE_CANDLE_MULTI[] PROGMEM = "Candle Multi@!,!;!,!;!;;sx=96,ix=224,pal=0";
+static const char _data_FX_MODE_CANDLE[] PROGMEM = "Candle@!,!,,,,,Multi;!,!;!;01;sx=96,ix=224,pal=0";
 
 
 /*
@@ -7759,16 +7721,16 @@ void WS2812FX::setupEffectData() {
   addEffect(FX_MODE_EXPLODING_FIREWORKS, &mode_exploding_fireworks, _data_FX_MODE_EXPLODING_FIREWORKS);
   addEffect(FX_MODE_BOUNCINGBALLS, &mode_bouncing_balls, _data_FX_MODE_BOUNCINGBALLS);
   addEffect(FX_MODE_SINELON, &mode_sinelon, _data_FX_MODE_SINELON);
-  addEffect(FX_MODE_SINELON_DUAL, &mode_sinelon_dual, _data_FX_MODE_SINELON_DUAL);
-  addEffect(FX_MODE_SINELON_RAINBOW, &mode_sinelon_rainbow, _data_FX_MODE_SINELON_RAINBOW);
+  //addEffect(FX_MODE_SINELON_DUAL, &mode_sinelon_dual, _data_FX_MODE_SINELON_DUAL);
+  //addEffect(FX_MODE_SINELON_RAINBOW, &mode_sinelon_rainbow, _data_FX_MODE_SINELON_RAINBOW);
   addEffect(FX_MODE_POPCORN, &mode_popcorn, _data_FX_MODE_POPCORN);
   addEffect(FX_MODE_DRIP, &mode_drip, _data_FX_MODE_DRIP);
   addEffect(FX_MODE_PLASMA, &mode_plasma, _data_FX_MODE_PLASMA);
   addEffect(FX_MODE_PERCENT, &mode_percent, _data_FX_MODE_PERCENT);
-  addEffect(FX_MODE_RIPPLE_RAINBOW, &mode_ripple_rainbow, _data_FX_MODE_RIPPLE_RAINBOW);
+  //addEffect(FX_MODE_RIPPLE_RAINBOW, &mode_ripple_rainbow, _data_FX_MODE_RIPPLE_RAINBOW);
   addEffect(FX_MODE_HEARTBEAT, &mode_heartbeat, _data_FX_MODE_HEARTBEAT);
   addEffect(FX_MODE_PACIFICA, &mode_pacifica, _data_FX_MODE_PACIFICA);
-  addEffect(FX_MODE_CANDLE_MULTI, &mode_candle_multi, _data_FX_MODE_CANDLE_MULTI);
+  //addEffect(FX_MODE_CANDLE_MULTI, &mode_candle_multi, _data_FX_MODE_CANDLE_MULTI);
   addEffect(FX_MODE_SOLID_GLITTER, &mode_solid_glitter, _data_FX_MODE_SOLID_GLITTER);
   addEffect(FX_MODE_SUNRISE, &mode_sunrise, _data_FX_MODE_SUNRISE);
   addEffect(FX_MODE_PHASED, &mode_phased, _data_FX_MODE_PHASED);
