@@ -14,6 +14,8 @@ class LightSleepUsermod : public Usermod {
   private:
     bool enabled = false;
     bool didSleep = false;
+    bool wakeUp = false;
+    
     static const char _name[];
     static const char _enabled[];
 
@@ -34,7 +36,14 @@ class LightSleepUsermod : public Usermod {
           //WLED::instance().initConnection(); // re-init connection (sets wifi sleep mode to user value, if set manually here, it can sometimes cause wifi issues)
           //TODO: initConnection is quite slow, after wake-up, UI is unresponsive for some time... maybe do a quick re-connect right here?
           //WiFi.disconnect();           // disconnect from wifi
+          //delay(5);
           WiFi.setSleep(!noWifiSleep); // set user setting
+          delay(10);
+          #if defined(CONFIG_IDF_TARGET_ESP32C3) // ESP32 C3
+            setCpuFrequencyMhz(160);      // set CPU frequency back to 160MHz
+          #else
+            setCpuFrequencyMhz(240);      // set CPU frequency back to 240MHz
+          #endif
          // WiFi.reconnect();            // reconnect to wifi
           didSleep = false;
         }
@@ -43,48 +52,73 @@ class LightSleepUsermod : public Usermod {
         return;
       }
       pinMode(8, OUTPUT);  // DEBUG output -> led on GPIO8 (C3 supermini)
-      digitalWrite(8, HIGH);
-      delay(50);
+      digitalWrite(8, HIGH);  // TODO: why is power consumption lower when using a delay here?
+      delay(10);  
       digitalWrite(8, LOW);
       // if we are in off mode, enable wifi sleep and enter light sleep
       if(millis() > LIGHTSLEEP_STARTUPDELAY) {
-        if(!didSleep) // first time sleep call
-          WiFi.setSleep(true); // save power
-        esp_sleep_enable_timer_wakeup(1000000);  // fallback: wake up every second
-        esp_sleep_enable_wifi_wakeup(); // note: not avialable on classic ESP32
+        if(!didSleep) { // first time sleep call
+          WiFi.setSleep(true); // save power by enabling wifi auto sleep
+          setCpuFrequencyMhz(80);
+          //wakeUp = false;
+        }
+
 
          //TODO: how to handle local time? needs a timer to keep track of time and update millis() after wake-up?
+        //while(!wakeUp) {
+          // enable wakeup on any configured button pins
+          for(int i = 0; i < WLED_MAX_BUTTONS; i++) {
+            if(btnPin[i] >= 0 && buttonType[i] > BTN_TYPE_RESERVED && buttonType[i] < BTN_TYPE_TOUCH) { // TODO: add touch button support for S3 and S2
+              #if defined(CONFIG_IDF_TARGET_ESP32C3) // ESP32 C3
+              bool wakeWhenHigh = digitalRead(btnPin[i]) == LOW; // button is currently low, wake when high (and vice versa)
+              if(wakeWhenHigh)
+                gpio_wakeup_enable((gpio_num_t)btnPin[i], GPIO_INTR_HIGH_LEVEL);
+              else
+                gpio_wakeup_enable((gpio_num_t)btnPin[i], GPIO_INTR_LOW_LEVEL);
 
-        // enable wakeup on any configured button pins
-        for(int i = 0; i < WLED_MAX_BUTTONS; i++) {
-          if(btnPin[i] >= 0 && buttonType[i] > BTN_TYPE_RESERVED && buttonType[i] < BTN_TYPE_TOUCH) { // TODO: add touch button support for S3 and S2
-            #if defined(CONFIG_IDF_TARGET_ESP32C3) // ESP32 C3
-            bool wakeWhenHigh = digitalRead(btnPin[i]) == LOW; // button is currently low, wake when high (and vice versa)
-            if(wakeWhenHigh)
-              gpio_wakeup_enable((gpio_num_t)btnPin[i], GPIO_INTR_HIGH_LEVEL);
-            else
-              gpio_wakeup_enable((gpio_num_t)btnPin[i], GPIO_INTR_LOW_LEVEL);
-
-            esp_sleep_enable_gpio_wakeup();
-            #else // S2, S3
-            bool wakeWhenHigh = digitalRead(btnPin[i]) == LOW; // button is currently low, wake when high (and vice versa)
-            if(wakeWhenHigh)
-              esp_sleep_enable_ext0_wakeup((gpio_num_t)btnPin[i], HIGH); // TODO: use ext1 for touch pins
-            else
-              esp_sleep_enable_ext0_wakeup((gpio_num_t)btnPin[i], LOW);
-            #endif
+              esp_sleep_enable_gpio_wakeup();
+              #else // S2, S3
+              bool wakeWhenHigh = digitalRead(btnPin[i]) == LOW; // button is currently low, wake when high (and vice versa)
+              if(wakeWhenHigh)
+                esp_sleep_enable_ext0_wakeup((gpio_num_t)btnPin[i], HIGH); // TODO: use ext1 for touch pins
+              else
+                esp_sleep_enable_ext0_wakeup((gpio_num_t)btnPin[i], LOW);
+              #endif
+            }
           }
-        }
-        esp_light_sleep_start();  // Enter light sleep
+          esp_sleep_enable_timer_wakeup(1000000);  // fallback: wake up every second
+          esp_sleep_enable_wifi_wakeup(); // note: not avialable on classic ESP32
+          esp_light_sleep_start();  // Enter light sleep
+
+          // we woke up, check if we should go back to sleep
+          //check wakeup reason
+          /*
+          esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+          if(wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
+
+          }
+          else
+            wakeUp = true; // wake up if button or wifi triggered
+*/
+      //  }
         didSleep = true;
+        // note: when skipping the below lines, connection can be lost after some time so better keep this
         if(!WiFi.isConnected()) { // TODO: this only checks STA mode, need to handle AP mode as well 
           WLED::instance().initConnection(); // re-init connection (sets wifi sleep mode to user value)  TODO: is there a better, faster way to check and re-connect?
-          didSleep = false; // reset sleep flag to re-enable wifi sleep
+          didSleep = false; // reset sleep flag to re-enable wifi sleep if set by user
         }
         WLED::instance().handleConnection(); // check wifi state, re-connect if necessary
+        
       }
     }
     //void connected() {} //unused, this is called every time the WiFi is (re)connected
+
+    bool onEspNowMessage(uint8_t* sender, uint8_t* payload, uint8_t len) {
+      wakeUp = true; // wake up on ESP-NOW message
+      return false; // not used
+    }
+    
+
 
     void addToConfig(JsonObject& root) override
     {
