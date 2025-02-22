@@ -32,14 +32,6 @@ class LightSleepUsermod : public Usermod {
         return;
 
       if(!offMode) {
-        if(skipSleep) {
-          pinMode(8, OUTPUT);  // DEBUG output -> led on GPIO8 (C3 supermini)
-         digitalWrite(8, HIGH);  // TODO: why is power consumption lower when using a delay here?
-      delay(50);  // a delay is needed to properly handle wifi stuff, connection is lost if this is set lower than 50 ms
-      digitalWrite(8, LOW);
-      delay(50);
-        }
-
         if(didSleep) { // after wake-up, set wifi-sleep back to user setting
           //WiFi.setSleep(!noWifiSleep);
           //WLED::instance().initConnection(); // re-init connection (sets wifi sleep mode to user value, if set manually here, it can sometimes cause wifi issues)
