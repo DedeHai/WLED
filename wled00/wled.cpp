@@ -619,8 +619,9 @@ void WLED::initConnection()
   }
 #endif
 
-  WiFi.disconnect(true); // close old connections
-  delay(5);              // wait for hardware to be ready
+  WiFi.disconnect(true, true);  // close old connections, clear stored credentials
+  WiFi.persistent(false);       // store credentials in RAM (prevents flash wear)
+  delay(5);                     // wait for hardware to be ready
 #ifdef ESP8266
   WiFi.setPhyMode(force802_3g ? WIFI_PHY_MODE_11G : WIFI_PHY_MODE_11N);
 #endif
@@ -670,6 +671,7 @@ void WLED::initConnection()
 
 #ifndef WLED_DISABLE_ESPNOW
   if (enableESPNow) {
+    delay(5); // wait for hardware to be ready
     quickEspNow.onDataSent(espNowSentCB);     // see udp.cpp
     quickEspNow.onDataRcvd(espNowReceiveCB);  // see udp.cpp
     bool espNowOK;
