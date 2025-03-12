@@ -2,6 +2,7 @@
 #ifndef WLED_DISABLE_ESPNOW
 
 #define ESPNOW_BUSWAIT_TIMEOUT 24 // one frame timeout to wait for bus to finish updating
+#define ESPNOW_NOWIFISLEEP_TIMEOUT 30000 // time in ms to re-enable wifi-sleep after receiving valid ESPNow message
 
 #define NIGHT_MODE_DEACTIVATED     -1
 #define NIGHT_MODE_BRIGHTNESS      5
@@ -41,6 +42,7 @@ typedef struct WizMoteMessageStructure {
 static uint32_t last_seq = UINT32_MAX;
 static int brightnessBeforeNightMode = NIGHT_MODE_DEACTIVATED;
 static int16_t ESPNowButton = -1; // set in callback if new button value is received
+static uint32_t ESPNow_timestamp; // timestamp of last received ESPNow message
 
 // Pulled from the IR Remote logic but reduced to 10 steps with a constant of 3
 static const byte brightnessSteps[] = {
@@ -232,6 +234,21 @@ void handleRemote() {
       case WIZ_SMART_BUTTON_BRIGHT_DOWN  : brightnessDown();                                break;
       default: break;
     }
+    // disable wifi sleep for a while after receiving a valid ESPNow message to not miss messages
+    ESPNow_timestamp = millis();
+    #ifdef ARDUINO_ARCH_ESP32
+    WiFi.setSleep(false);
+    #else
+    wifi_set_sleep_type(NONE_SLEEP_T);
+    #endif
+  }
+  else if(millis() - ESPNow_timestamp > ESPNOW_NOWIFISLEEP_TIMEOUT) {
+    // re-enable wifi sleep if enabled
+    #ifdef ARDUINO_ARCH_ESP32
+    WiFi.setSleep(!noWifiSleep);
+    #else
+    wifi_set_sleep_type((noWifiSleep) ? NONE_SLEEP_T : MODEM_SLEEP_T);
+    #endif
   }
   ESPNowButton = -1;
 }
