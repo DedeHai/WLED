@@ -183,7 +183,7 @@ bool IRAM_ATTR Segment::isPixelXYClipped(int x, int y) const {
   return false;
 }
 
-void IRAM_ATTR Segment::setPixelColorXY(int x, int y, uint32_t col) const
+void IRAM_ATTR Segment::setPixelColorXY(unsigned x, unsigned y, uint32_t col) const
 {
   if (!isActive()) return; // not active
 
@@ -191,7 +191,7 @@ void IRAM_ATTR Segment::setPixelColorXY(int x, int y, uint32_t col) const
   const int vH = vHeight();  // segment height in logical pixels (is always >= 1)
   const auto XY = [&](unsigned x, unsigned y){ return x + y*vW; };
 
-  if (x >= vW || y >= vH || x < 0 || y < 0) return;  // if pixel would fall out of virtual segment just exit
+  if (x >= vW || y >= vH) return;  // if pixel would fall out of virtual segment just exit
 
   setPixelColorRaw(XY(x,y), col);
 }
@@ -240,14 +240,14 @@ void Segment::setPixelColorXY(float x, float y, uint32_t col, bool aa) const
 #endif
 
 // returns RGBW values of pixel
-uint32_t IRAM_ATTR Segment::getPixelColorXY(int x, int y) const {
+uint32_t IRAM_ATTR Segment::getPixelColorXY(unsigned x, unsigned y) const {
   if (!isActive()) return 0; // not active
 
   const int vW = vWidth();
   const int vH = vHeight();
   const auto XY = [&](int x, int y){ return x + y*vW; };
 
-  if (x >= vW || y >= vH || x<0 || y<0) return 0;  // if pixel would fall out of virtual segment just exit
+  if (x >= vW || y >= vH) return 0;  // if pixel would fall out of virtual segment just exit
 
   return getPixelColorRaw(XY(x,y));
 }

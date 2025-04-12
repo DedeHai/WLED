@@ -347,11 +347,11 @@ static bool deserializeSegment(JsonObject elem, byte it, byte presetId)
             for (size_t c = 0; c < 4; c++) rgbw[c] = brgbw[c];
           }
         }
-
+/*
         if (iSet < 2 || iStop <= iStart) iStop = iStart + 1;
         uint32_t c = RGBW32(rgbw[0], rgbw[1], rgbw[2], rgbw[3]);
         while (iStart < iStop) seg.setRawPixelColor(iStart++, c); // sets pixel color without 1D->2D expansion, grouping or spacing
-        iSet = 0;
+        iSet = 0;*/
       }
     }
     strip.trigger(); // force segment update

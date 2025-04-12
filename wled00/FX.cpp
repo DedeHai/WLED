@@ -6413,6 +6413,7 @@ uint16_t mode_particlevortex(void) {
   ParticleSystem2D *PartSys = nullptr;
   uint32_t i, j;
 
+uint32_t start =  micros();
   if (SEGMENT.call == 0) { // initialization
     if (!initParticleSystem2D(PartSys, NUMBEROFSOURCES))
       return mode_static(); // allocation failed
@@ -6510,6 +6511,8 @@ uint16_t mode_particlevortex(void) {
     }
   }
   PartSys->update(); //update all particles and render to frame
+  uint32_t time = micros() - start;
+  Serial.println(time); // debug: time taken for this frame
   return FRAMETIME;
 }
 #undef NUMBEROFSOURCES
@@ -6742,7 +6745,7 @@ uint16_t mode_particlefire(void) {
   ParticleSystem2D *PartSys = nullptr;
   uint32_t i; // index variable
   uint32_t numFlames; // number of flames: depends on fire width. for a fire width of 16 pixels, about 25-30 flames give good results
-
+  uint32_t start = micros();
   if (SEGMENT.call == 0) { // initialization TODO: make this a PSinit function, this is needed in every particle FX but first, get this working.
     if (!initParticleSystem2D(PartSys, SEGMENT.virtualWidth(), 4)) //maximum number of source (PS may limit based on segment size); need 4 additional bytes for time keeping (uint32_t lastcall)
       return mode_static(); // allocation failed or not 2D
@@ -6819,7 +6822,8 @@ uint16_t mode_particlefire(void) {
   }
 
   PartSys->updateFire(SEGMENT.intensity, false); // update and render the fire
-
+  uint32_t time = micros() - start;
+  Serial.println(time); // debug: time taken for this function
   return FRAMETIME;
 }
 static const char _data_FX_MODE_PARTICLEFIRE[] PROGMEM = "PS Fire@Speed,Intensity,Flame Height,Wind,Spread,Smooth,Cylinder,Turbulence;;!;2;pal=35,sx=110,c1=110,c2=50,c3=31,o1=1";
@@ -8994,7 +8998,7 @@ void WS2812FX::setupEffectData() {
   addEffect(FX_MODE_ROLLINGBALLS, &rolling_balls, _data_FX_MODE_ROLLINGBALLS);
   addEffect(FX_MODE_SPARKLE, &mode_sparkle, _data_FX_MODE_SPARKLE);
   addEffect(FX_MODE_GLITTER, &mode_glitter, _data_FX_MODE_GLITTER);
-  addEffect(FX_MODE_SOLID_GLITTER, &mode_solid_glitter, _data_FX_MODE_SOLID_GLITTER);
+  //addEffect(FX_MODE_SOLID_GLITTER, &mode_solid_glitter, _data_FX_MODE_SOLID_GLITTER);
   addEffect(FX_MODE_STARBURST, &mode_starburst, _data_FX_MODE_STARBURST);
   addEffect(FX_MODE_DANCING_SHADOWS, &mode_dancing_shadows, _data_FX_MODE_DANCING_SHADOWS);
   addEffect(FX_MODE_FIRE_2012, &mode_fire_2012, _data_FX_MODE_FIRE_2012);

@@ -419,11 +419,10 @@ class Segment {
     mutable uint16_t aux0;  // custom var
     mutable uint16_t aux1;  // custom var
     byte     *data; // effect data pointer
-
+    CRGBW *pixels;                 // pixel data TODO: make this protected? using sPcraw() prohibits use for fast blurring, fast clearing and direct manipulation
     static uint16_t maxWidth, maxHeight;  // these define matrix width & height (max. segment dimensions)
 
   private:
-    uint32_t *pixels;                 // pixel data
     unsigned _dataLen;
     uint8_t  _default_palette;        // palette number that gets assigned to pal0
     union {
@@ -552,7 +551,7 @@ class Segment {
     {
       DEBUGFX_PRINTF_P(PSTR("-- Creating segment: %p [%d,%d:%d,%d]\n"), this, (int)start, (int)stop, (int)startY, (int)stopY);
       // allocate render buffer (always entire segment)
-      pixels = static_cast<uint32_t*>(d_calloc(sizeof(uint32_t), length())); // error handling is also done in isActive()
+      pixels = static_cast<CRGBW*>(d_calloc(sizeof(CRGBW), length())); // error handling is also done in isActive()
       if (!pixels) {
         DEBUGFX_PRINTLN(F("!!! Not enough RAM for pixel buffer !!!"));
         extern byte errorFlag;
@@ -677,10 +676,10 @@ class Segment {
     }
   #ifndef WLED_DISABLE_2D
     inline bool is2D() const                                                            { return (width()>1 && height()>1); }
-    [[gnu::hot]] void setPixelColorXY(int x, int y, uint32_t c) const; // set relative pixel within segment with color
-    inline void setPixelColorXY(unsigned x, unsigned y, uint32_t c) const               { setPixelColorXY(int(x), int(y), c); }
+    [[gnu::hot]] void setPixelColorXY(unsigned x, unsigned y, uint32_t c) const; // set relative pixel within segment with color
+    //inline void setPixelColorXY(unsigned x, unsigned y, uint32_t c) const               { setPixelColorXY(int(x), int(y), c); }
     inline void setPixelColorXY(int x, int y, byte r, byte g, byte b, byte w = 0) const { setPixelColorXY(x, y, RGBW32(r,g,b,w)); }
-    inline void setPixelColorXY(int x, int y, CRGB c) const                             { setPixelColorXY(x, y, RGBW32(c.r,c.g,c.b,0)); }
+    //inline void setPixelColorXY(int x, int y, CRGB c) const                             { setPixelColorXY(x, y, RGBW32(c.r,c.g,c.b,0)); }
     inline void setPixelColorXY(unsigned x, unsigned y, CRGB c) const                   { setPixelColorXY(int(x), int(y), RGBW32(c.r,c.g,c.b,0)); }
     #ifdef WLED_USE_AA_PIXELS
     void setPixelColorXY(float x, float y, uint32_t c, bool aa = true) const;
@@ -688,7 +687,7 @@ class Segment {
     inline void setPixelColorXY(float x, float y, CRGB c, bool aa = true) const                             { setPixelColorXY(x, y, RGBW32(c.r,c.g,c.b,0), aa); }
     #endif
     [[gnu::hot]] bool isPixelXYClipped(int x, int y) const;
-    [[gnu::hot]] uint32_t getPixelColorXY(int x, int y) const;
+    [[gnu::hot]] uint32_t getPixelColorXY(unsigned x, unsigned y) const;
     // 2D support functions
     inline void blendPixelColorXY(uint16_t x, uint16_t y, uint32_t color, uint8_t blend) const { setPixelColorXY(x, y, color_blend(getPixelColorXY(x,y), color, blend)); }
     inline void blendPixelColorXY(uint16_t x, uint16_t y, CRGB c, uint8_t blend) const         { blendPixelColorXY(x, y, RGBW32(c.r,c.g,c.b,0), blend); }

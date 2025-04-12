@@ -18,7 +18,6 @@
 #include "wled.h"
 
 #define PS_P_MAXSPEED 120 // maximum speed a particle can have (vx/vy is int8)
-#define MAX_MEMIDLE 100 // max idle time (in frames) before memory is deallocated (if deallocated during an effect, it will crash!)
 
 //#define WLED_DEBUG_PS // note: enabling debug uses ~3k of flash
 
@@ -29,27 +28,6 @@
   #define PSPRINT(x)
   #define PSPRINTLN(x)
 #endif
-
-// memory and transition manager
-struct partMem {
-  void* particleMemPointer;   // pointer to particle memory
-  uint32_t buffersize;        // buffer size in bytes
-  uint8_t particleType;       // type of particles currently in memory: 0 = none, particle struct size otherwise (required for 1D<->2D transitions)
-  uint8_t id;                 // ID of segment this memory belongs to
-  uint8_t watchdog;           // counter to handle deallocation
-  uint8_t currentFX;          // current FX ID, is set when transition is complete, used to detect back and forth transitions
-  bool finalTransfer;         // used to update buffer in rendering function after transition has ended
-  bool transferParticles;     // if set, particles in buffer are transferred to new FX
-};
-
-void* particleMemoryManager(const uint32_t requestedParticles, size_t structSize, uint32_t &availableToPS, uint32_t numParticlesUsed, const uint8_t effectID); // update particle memory pointer, handles memory transitions
-void particleHandover(void *buffer, size_t structSize, int32_t numParticles);
-void updateUsedParticles(const uint32_t allocated, const uint32_t available, const uint8_t percentage, uint32_t &used);
-bool segmentIsOverlay(void); // check if segment is fully overlapping with at least one underlying segment
-partMem* getPartMem(void); // returns pointer to memory struct for current segment or nullptr
-void updateRenderingBuffer(uint32_t requiredpixels, bool isFramebuffer, bool initialize); // allocate CRGB rendering buffer, update size if needed
-void transferBuffer(uint32_t width, uint32_t height, bool useAdditiveTransfer = false); // transfer the buffer to the segment (supports 1D and 2D)
-void servicePSmem(); // increments watchdog, frees memory if idle too long
 
 // limit speed of particles (used in 1D and 2D)
 static inline int32_t limitSpeed(const int32_t speed) {
@@ -210,7 +188,7 @@ public:
 private:
   //rendering functions
   void ParticleSys_render();
-  [[gnu::hot]] void renderParticle(const uint32_t particleindex, const uint32_t brightness, const CRGB& color, const bool wrapX, const bool wrapY);
+  [[gnu::hot]] void renderParticle(const uint32_t particleindex, const uint8_t brightness, const CRGBW& color, const bool wrapX, const bool wrapY);
   //paricle physics applied by system if flags are set
   void applyGravity(); // applies gravity to all particles
   void handleCollisions();
@@ -243,7 +221,7 @@ private:
   uint8_t effectID; // ID of the effect that is using this particle system, used for transitions
 };
 
-void blur2D(CRGB *colorbuffer, const uint32_t xsize, uint32_t ysize, const uint32_t xblur, const uint32_t yblur, const uint32_t xstart = 0, uint32_t ystart = 0, const bool isparticle = false);
+void blur2D(CRGBW *colorbuffer, const uint32_t xsize, uint32_t ysize, const uint8_t xblur, const uint8_t yblur, const uint32_t xstart = 0, uint32_t ystart = 0, const bool isparticle = false);
 // initialization functions (not part of class)
 bool initParticleSystem2D(ParticleSystem2D *&PartSys, const uint32_t requestedsources, const uint32_t additionalbytes = 0, const bool advanced = false, const bool sizecontrol = false);
 uint32_t calculateNumberOfParticles2D(const uint32_t pixels, const bool advanced, const bool sizecontrol);
@@ -341,7 +319,7 @@ public:
   int32_t sprayEmit(const PSsource1D &emitter);
   void particleMoveUpdate(PSparticle1D &part, PSparticleFlags1D &partFlags, PSsettings1D *options = NULL, PSadvancedParticle1D *advancedproperties = NULL); // move function
   //particle physics
-  [[gnu::hot]]  void applyForce(PSparticle1D &part, const int8_t xforce, uint8_t &counter); //apply a force to a single particle
+  [[gnu::hot]] void applyForce(PSparticle1D &part, const int8_t xforce, uint8_t &counter); //apply a force to a single particle
   void applyForce(const int8_t xforce); // apply a force to all particles
   void applyGravity(PSparticle1D &part, PSparticleFlags1D &partFlags); // applies gravity to single particle (use this for sources)
   void applyFriction(const int32_t coefficient); // apply friction to all used particles
@@ -376,12 +354,12 @@ public:
 private:
   //rendering functions
   void ParticleSys_render(void);
-  void renderParticle(const uint32_t particleindex, const uint32_t brightness, const CRGB &color, const bool wrap);
+  [[gnu::hot]] void renderParticle(const uint32_t particleindex, const uint8_t brightness, const CRGBW &color, const bool wrap);
 
   //paricle physics applied by system if flags are set
   void applyGravity(); // applies gravity to all particles
   void handleCollisions();
-  [[gnu::hot]] void collideParticles(PSparticle1D &particle1, const PSparticleFlags1D &particle1flags, PSparticle1D &particle2, const PSparticleFlags1D &particle2flags, int32_t dx, int32_t relativeVx, const int32_t collisiondistance);
+  [[gnu::hot]] void collideParticles(PSparticle1D &particle1, const PSparticleFlags1D &particle1flags, PSparticle1D &particle2, const PSparticleFlags1D &particle2flags, const int32_t dx, const uint32_t dx_abs, const int32_t collisiondistance);
 
   //utility functions
   void updatePSpointers(const bool isadvanced); // update the data pointers to current segment data space
@@ -407,9 +385,9 @@ private:
   uint8_t effectID; // ID of the effect that is using this particle system, used for transitions
 };
 
-bool initParticleSystem1D(ParticleSystem1D *&PartSys, const uint32_t requestedsources, const uint8_t fractionofparticles = 255, const uint32_t additionalbytes = 0, const bool advanced = false);
+bool initParticleSystem1D(ParticleSystem1D *&PartSys, const uint32_t requestedsources, const uint8_t fractionofparticles = 255, const uint32_t additionalbytes = 0, bool advanced = false);
 uint32_t calculateNumberOfParticles1D(const uint32_t fraction, const bool isadvanced);
 uint32_t calculateNumberOfSources1D(const uint32_t requestedsources);
 bool allocateParticleSystemMemory1D(const uint32_t numparticles, const uint32_t numsources, const bool isadvanced, const uint32_t additionalbytes);
-void blur1D(CRGB *colorbuffer, uint32_t size, uint32_t blur, uint32_t start);
+void blur1D(CRGBW *colorbuffer, uint32_t size, uint8_t blur, uint32_t start);
 #endif // WLED_DISABLE_PARTICLESYSTEM1D

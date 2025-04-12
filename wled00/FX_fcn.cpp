@@ -98,8 +98,8 @@ Segment::Segment(const Segment &orig) {
   if (orig.name) { name = static_cast<char*>(d_malloc(strlen(orig.name)+1)); if (name) strcpy(name, orig.name); }
   if (orig.data) { if (allocateData(orig._dataLen)) memcpy(data, orig.data, orig._dataLen); }
   if (orig.pixels) {
-    pixels = static_cast<uint32_t*>(d_malloc(sizeof(uint32_t) * orig.length()));
-    if (pixels) memcpy(pixels, orig.pixels, sizeof(uint32_t) * orig.length());
+    pixels = static_cast<CRGBW*>(d_malloc(sizeof(CRGBW) * orig.length()));
+    if (pixels) memcpy(pixels, orig.pixels, sizeof(CRGBW) * orig.length());
     else {
       DEBUGFX_PRINTLN(F("!!! Not enough RAM for pixel buffer !!!"));
       errorFlag = ERR_NORAM_PX;
@@ -139,8 +139,8 @@ Segment& Segment::operator= (const Segment &orig) {
     if (orig.name) { name = static_cast<char*>(d_malloc(strlen(orig.name)+1)); if (name) strcpy(name, orig.name); }
     if (orig.data) { if (allocateData(orig._dataLen)) memcpy(data, orig.data, orig._dataLen); }
     if (orig.pixels) {
-      pixels = static_cast<uint32_t*>(d_malloc(sizeof(uint32_t) * orig.length()));
-      if (pixels) memcpy(pixels, orig.pixels, sizeof(uint32_t) * orig.length());
+      pixels = static_cast<CRGBW*>(d_malloc(sizeof(CRGBW) * orig.length()));
+      if (pixels) memcpy(pixels, orig.pixels, sizeof(CRGBW) * orig.length());
       else {
         DEBUGFX_PRINTLN(F("!!! Not enough RAM for pixel buffer !!!"));
         errorFlag = ERR_NORAM_PX;
@@ -474,8 +474,8 @@ void Segment::setGeometry(uint16_t i1, uint16_t i2, uint8_t grp, uint8_t spc, ui
   }
   // re-allocate FX render buffer
   if (length() != oldLength) {
-    if (pixels) pixels = static_cast<uint32_t*>(d_realloc(pixels, sizeof(uint32_t) * length()));
-    else        pixels = static_cast<uint32_t*>(d_malloc(sizeof(uint32_t) * length()));
+    if (pixels) pixels = static_cast<CRGBW*>(d_realloc(pixels, sizeof(CRGBW) * length()));
+    else        pixels = static_cast<CRGBW*>(d_malloc(sizeof(CRGBW) * length()));
     if (!pixels) {
       DEBUGFX_PRINTLN(F("!!! Not enough RAM for pixel buffer !!!"));
       errorFlag = ERR_NORAM_PX;
@@ -1364,9 +1364,6 @@ void WS2812FX::service() {
     }
     _segment_index++;
   }
-  #if !(defined(WLED_DISABLE_PARTICLESYSTEM2D) && defined(WLED_DISABLE_PARTICLESYSTEM1D))
-  servicePSmem(); // handle segment particle system memory
-  #endif
 
   #ifdef WLED_DEBUG_FX
   if (millis() - nowUp > _frametime) DEBUGFX_PRINTF_P(PSTR("Slow effects %u/%d.\n"), (unsigned)(millis()-nowUp), (int)_frametime);
