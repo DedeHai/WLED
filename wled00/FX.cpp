@@ -120,10 +120,22 @@ static um_data_t* getAudioData() {
  * No blinking. Just plain old static light.
  */
 uint16_t mode_static(void) {
-  SEGMENT.fill(SEGCOLOR(0));
+  const int cols = SEG_W;
+  const int rows = SEG_H;
+  int scale = 0;
+  CRGB color = SEGCOLOR(0);
+  for (int x = 0; x < cols; x++) for (int y = 0; y < rows; y+=2) {
+    SEGMENT.setPixelColorXY(x,y, color.scale8((scale * SEGMENT.intensity)>>8));
+    scale++;
+  }
+  scale = 0;
+  for (int x = 0; x < cols; x++) for (int y = 1; y < rows; y+=2) {
+    //SEGMENT.setPixelColorXY(x,y, color.scale8((scale * SEGMENT.intensity)>>8));
+    scale++;
+  }
   return strip.isOffRefreshRequired() ? FRAMETIME : 350;
 }
-static const char _data_FX_MODE_STATIC[] PROGMEM = "Solid";
+static const char _data_FX_MODE_STATIC[] PROGMEM = "Solid@!,!;!,!;!;01";
 
 
 /*
@@ -163,7 +175,31 @@ uint16_t blink(uint32_t color1, uint32_t color2, bool strobe, bool do_palette) {
  * Normal blinking. Intensity sets duty cycle.
  */
 uint16_t mode_blink(void) {
-  return blink(SEGCOLOR(0), SEGCOLOR(1), false, true);
+    const int cols = SEG_W;
+  const int rows = SEG_H;
+  int scale = 0;
+  //apply gamma first, then scale
+  CRGB color = SEGCOLOR(0);
+  color.r = gamma8(color.r);
+  color.g = gamma8(color.g);
+  color.b = gamma8(color.b);
+  for (int y = 0; y < rows/2; y++) for (int x = 0; x < cols; x++) {
+  
+    SEGMENT.setPixelColorXY(x,y, color.scale8((scale * SEGMENT.intensity)>>8));
+    scale+=2;
+  }
+  scale = 0;
+  //scale first then apply gamma
+  for (int y = 8; y < rows; y++) for (int x = 0; x < cols; x++) {
+    color = SEGCOLOR(0);
+    color = color.scale8((scale * SEGMENT.intensity)>>8); 
+    color.r = gamma8(color.r);
+    color.g = gamma8(color.g);
+    color.b = gamma8(color.b);
+    SEGMENT.setPixelColorXY(x,y, color);
+    scale+=2;
+  }
+  return FRAMETIME;
 }
 static const char _data_FX_MODE_BLINK[] PROGMEM = "Blink@!,Duty cycle;!,!;!;01";
 

@@ -512,6 +512,7 @@ static inline float maxf(float v, float w)
 // called from bus manager when color correction is enabled!
 uint32_t colorBalanceFromKelvin(uint16_t kelvin, uint32_t rgb)
 {
+  Serial.print("*");
   //remember so that slow colorKtoRGB() doesn't have to run for every setPixelColor()
   static byte correctionRGB[4] = {0,0,0,0};
   static uint16_t lastKelvin = 0;
@@ -566,12 +567,20 @@ uint16_t approximateKelvinFromRGB(uint32_t rgb) {
 
 // gamma lookup table used for color correction (filled on 1st use (cfg.cpp & set.cpp))
 uint8_t NeoGammaWLEDMethod::gammaT[256];
+uint8_t NeoGammaWLEDMethod::gammaT_inv[256];
 
 // re-calculates & fills gamma table
 void NeoGammaWLEDMethod::calcGammaTable(float gamma)
 {
   for (size_t i = 0; i < 256; i++) {
     gammaT[i] = (int)(powf((float)i / 255.0f, gamma) * 255.0f + 0.5f);
+  }
+}
+
+void NeoGammaWLEDMethod::calcInverseGammaTable(float gamma)
+{
+  for (size_t i = 0; i < 256; i++) {
+    gammaT_inv[i] = (int)(powf((float)i / 255.0f, 1/gamma) * 255.0f + 0.5f); //inverse
   }
 }
 

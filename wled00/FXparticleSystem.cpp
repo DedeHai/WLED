@@ -579,9 +579,9 @@ void ParticleSystem2D::render() {
       continue;
     // generate RGB values for particle
     if (fireIntesity) { // fire mode
-      brightness = (uint32_t)particles[i].ttl * (3 + (fireIntesity >> 5)) + 20;
+      brightness = (uint32_t)particles[i].ttl * (3 + (fireIntesity >> 5)) + 5;
       brightness = min(brightness, (uint32_t)255);
-      baseRGB = ColorFromPaletteWLED(SEGPALETTE, brightness, 255);
+      baseRGB = ColorFromPaletteWLED(SEGPALETTE, brightness, 255, LINEARBLEND_NOWRAP);
     }
     else {
       brightness = min((particles[i].ttl << 1), (int)255);
@@ -595,6 +595,7 @@ void ParticleSystem2D::render() {
         baseRGB = (CRGB)tempcolor;
       }
     }
+    brightness = gamma8(brightness); // apply gamma correction, used for gamma-inverted brightness distribution, +2 to not fully fade out
     renderParticle(i, brightness, baseRGB, particlesettings.wrapX, particlesettings.wrapY);
   }
 
@@ -666,6 +667,16 @@ __attribute__((optimize("O2"))) void ParticleSystem2D::renderParticle(const uint
   pxlbrightness[1] = (dx * precal2) >> PS_P_SURFACE; // bottom right value equal to (dx * (PS_P_RADIUS-dy) * brightness) >> PS_P_SURFACE
   pxlbrightness[2] = (dx * precal3) >> PS_P_SURFACE; // top right value equal to (dx * dy * brightness) >> PS_P_SURFACE
   pxlbrightness[3] = (precal1 * precal3) >> PS_P_SURFACE; // top left value equal to ((PS_P_RADIUS-dx) * dy * brightness) >> PS_P_SURFACE
+
+  // adjust brightness such that distribution is linear after gamma correction:
+  // - scale brigthness with gamma correction (done in render())
+  // - apply inverse gamma correction to brightness values
+  // - gamma is applied again in show() -> the resulting brightness distribution is linear but gamma corrected in total
+
+  pxlbrightness[0] = gamma8inv(pxlbrightness[0]); // use look-up-table for invers gamma
+  pxlbrightness[1] = gamma8inv(pxlbrightness[1]);
+  pxlbrightness[2] = gamma8inv(pxlbrightness[2]);
+  pxlbrightness[3] = gamma8inv(pxlbrightness[3]);
 
   if (advPartProps && advPartProps[particleindex].size > 0) { //render particle to a bigger size
     CRGB renderbuffer[100]; // 10x10 pixel buffer

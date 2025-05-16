@@ -209,17 +209,39 @@ const uint8_t lava_gp[] PROGMEM = {
   234, 255, 255,  51,
   244, 255, 255, 153,
   255, 255, 255, 255};
+  /* 
+  // lava gamma corrected such that after applying gamma of 2.2 it looks like the original
+     0,   0,   0,   0,
+   46,  73,   0,   0,
+   97, 174,   0,   0,
+  108, 193,  35,   7,
+  119, 214,  72,  17,
+  147, 234, 111,  26,
+  174, 255, 149,  38,
+  189, 255, 175,  38,
+  203, 255, 202,  38,
+  218, 255, 229,  38,
+  234, 255, 255,  38,
+  245, 255, 255, 139,
+  255, 255, 255, 255,};
+  */
 
 // Gradient palette "fierce-ice_gp", originally from
 // http://seaviewsensing.com/pub/cpt-city/neota/elem/fierce-ice.c3g
 const uint8_t fierce_ice_gp[] PROGMEM = {
-    0,   0,   0,   0,
-   59,   0,  51, 128,
-  119,   0, 102, 255,
-  149,  51, 153, 255,
-  180, 102, 204, 255,
-  217, 178, 230, 255,
-  255, 255, 255, 255};
+     0,   0,   0,   0, //!!! revert, this is gamma corrected fire for comparison 
+   46,  73,   0,   0,
+   97, 174,   0,   0,
+  108, 193,  35,   7,
+  119, 214,  72,  17,
+  147, 234, 111,  26,
+  174, 255, 149,  38,
+  189, 255, 175,  38,
+  203, 255, 202,  38,
+  218, 255, 229,  38,
+  234, 255, 255,  38,
+  245, 255, 255, 139,
+  255, 255, 255, 255,};
 
 // Gradient palette "Colorfull_gp", originally from
 // http://seaviewsensing.com/pub/cpt-city/nd/atmospheric/Colorfull.c3g
@@ -416,6 +438,21 @@ const byte Orangery_gp[] PROGMEM = {
   180, 158, 13, 11,
   210, 241, 82, 17,
   255, 213, 37,  4};
+
+
+  //inverse gamma corrected with gamma = 2.2
+/*
+const byte Orangery_gp[] PROGMEM = {
+    0,   255, 163,  85,
+   30,  255, 152,   0,
+   60,  240,  66,  53,
+   90,  197, 115,  28,
+  120,  255, 174,  74,
+  150,  255, 141,   0,
+  180,  205,  66,  61,
+  210,  249, 152,  74,
+  255,  235, 106,  39
+};*/
 
 //inspired by Mark Kriegsman https://gist.github.com/kriegsman/756ea6dcae8e30845b5a
 const byte C9_gp[] PROGMEM = {
