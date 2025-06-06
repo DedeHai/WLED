@@ -595,7 +595,7 @@ void ParticleSystem2D::render() {
         baseRGB = (CRGB)tempcolor;
       }
     }
-    brightness = gamma8(brightness); // apply gamma correction, used for gamma-inverted brightness distribution, +2 to not fully fade out
+    brightness = gamma8(brightness); // apply gamma correction, used for gamma-inverted brightness distribution
     renderParticle(i, brightness, baseRGB, particlesettings.wrapX, particlesettings.wrapY);
   }
 
@@ -672,7 +672,6 @@ __attribute__((optimize("O2"))) void ParticleSystem2D::renderParticle(const uint
   // - scale brigthness with gamma correction (done in render())
   // - apply inverse gamma correction to brightness values
   // - gamma is applied again in show() -> the resulting brightness distribution is linear but gamma corrected in total
-
   pxlbrightness[0] = gamma8inv(pxlbrightness[0]); // use look-up-table for invers gamma
   pxlbrightness[1] = gamma8inv(pxlbrightness[1]);
   pxlbrightness[2] = gamma8inv(pxlbrightness[2]);
@@ -1465,6 +1464,7 @@ void ParticleSystem1D::render() {
         baseRGB = (CRGB)tempcolor;
       }
     }
+    brightness = gamma8(brightness); // apply gamma correction, used for gamma-inverted brightness distribution
     renderParticle(i, brightness, baseRGB, particlesettings.wrap);
   }
   // apply smear-blur to rendered frame
@@ -1532,6 +1532,13 @@ __attribute__((optimize("O2"))) void ParticleSystem1D::renderParticle(const uint
   //calculate the brightness values for both pixels using linear interpolation (note: in standard rendering out of frame pixels could be skipped but if checks add more clock cycles over all)
   pxlbrightness[0] = (((int32_t)PS_P_RADIUS_1D - dx) * brightness) >> PS_P_SURFACE_1D;
   pxlbrightness[1] = (dx * brightness) >> PS_P_SURFACE_1D;
+
+  // adjust brightness such that distribution is linear after gamma correction:
+  // - scale brigthness with gamma correction (done in render())
+  // - apply inverse gamma correction to brightness values
+  // - gamma is applied again in show() -> the resulting brightness distribution is linear but gamma corrected in total
+  pxlbrightness[0] = gamma8inv(pxlbrightness[0]); // use look-up-table for invers gamma
+  pxlbrightness[1] = gamma8inv(pxlbrightness[1]);
 
   // check if particle has advanced size properties and buffer is available
   if (advPartProps && advPartProps[particleindex].size > 1) {
