@@ -2,7 +2,7 @@
 
 #include "wled.h"
 //#include "driver/rtc_io.h"
-
+#include "esp_pm.h"
 #ifdef ESP8266
 #error The "Light Sleep" usermod does not support ESP8266
 #endif
@@ -28,36 +28,55 @@ class LightSleepUsermod : public Usermod {
     void setup() { } // nothing to set-up
 
     void loop() {
+      //delay(10);
       if (!enabled) // disabled
         return;
 
       if(!offMode) {
         if(didSleep) { // after wake-up, set wifi-sleep back to user setting
-          //WiFi.setSleep(!noWifiSleep);
-          //WLED::instance().initConnection(); // re-init connection (sets wifi sleep mode to user value, if set manually here, it can sometimes cause wifi issues)
-          //TODO: initConnection is quite slow, after wake-up, UI is unresponsive for some time... maybe do a quick re-connect right here?
-          //WiFi.disconnect();           // disconnect from wifi
-          delay(5);
-          WiFi.setSleep(!noWifiSleep); // set user set ting
-          delay(5);
+        
           #if defined(CONFIG_IDF_TARGET_ESP32C3) // ESP32 C3
             setCpuFrequencyMhz(160);      // set CPU frequency back to 160MHz
           #else
+           esp_wifi_stop();
+           //WiFi.disconnect(); // much slower than using stop and start
             setCpuFrequencyMhz(240);      // set CPU frequency back to 240MHz
+           //  delay(1);
+          if(noWifiSleep) {
+            WiFi.setSleep(WIFI_PS_NONE); // disable wifi sleep again
+            //delay(50); // not sure this is needed... can it be removed or reduced?
+          }
+          esp_wifi_start();
+          WiFi.reconnect();
+          uint32_t timestamp = millis();
+           Serial.print("Waiting for WiFi to connect");
+           int counter = 0;
+          while(WiFi.isConnected() == false) {
+            Serial.println(millis() - timestamp);
+            delay(1);
+            counter++;
+            if(counter > 5000) {
+             break;
+            }
+          }
+
           #endif
-         // WiFi.reconnect();            // reconnect to wifi
+
+          
+
           didSleep = false;
         }
         //if(!WiFi.isConnected()) // TODO: this only checks STA mode, need to handle AP mode as well, also, only check like every 5 seconds or so -> this should actually be done in handle connection?
           //WLED::instance().initConnection(); // re-init connection (sets wifi sleep mode to user value)  TODO: is there a better, faster way to check and re-connect?
         return;
       }
+      /*
       pinMode(8, OUTPUT);  // DEBUG output -> led on GPIO8 (C3 supermini)
       digitalWrite(8, HIGH);  // TODO: why is power consumption lower when using a delay here?
       delay(50);  // a delay is needed to properly handle wifi stuff, connection is lost if this is set lower than 50 ms
       digitalWrite(8, LOW);
       digitalWrite(7, HIGH); // debug, relay on
-
+*/
       static int skipcounter = 0;
 
       // if we are in off mode, enable wifi sleep and spend some time in light sleep
@@ -68,17 +87,27 @@ class LightSleepUsermod : public Usermod {
         }
         wakeUp = false;
         if(!didSleep) { // first time sleep call
-          setCpuFrequencyMhz(80); // slow down CPU to 80MHz to save power (80MHz is lowest possible frequency with wifi enabled)
-        }
 
-        if(WiFi.getSleep() != WIFI_PS_MIN_MODEM) { // check if wifi sleep is enabled, enable it if it is not
-          WiFi.setSleep(WIFI_PS_MIN_MODEM); // save power by enabling wifi auto sleep
-          delay(50); // make sure wifi is stable before going to sleep (not sure this is needed)
+         esp_wifi_stop(); // needed on ESP32: when changing CPU frequency, wifi connection is lost (known bug), stopping wifi reconnects much faster (in about 100ms) but all connections are lost
+           //WiFi.disconnect(); // much slower than using stop and start
+              setCpuFrequencyMhz(80); // slow down CPU to 80MHz to save power (80MHz is lowest possible frequency with wifi enabled)
+           //  delay(1);
+       //  if(WiFi.getSleep() != WIFI_PS_MIN_MODEM) { // check if wifi sleep is enabled, enable it if it is not
+          WiFi.setSleep(WIFI_PS_MIN_MODEM); // save power by enabling wifi auto sleep (does nothing if it is already enabled)
+          //delay(10); // make sure wifi is stable (not sure this is needed)
+        //}
+          esp_wifi_start();
+          WiFi.reconnect();
         }
+        
+
+
+
 
          //TODO: how to handle local time? needs a timer to keep track of time and update millis() after wake-up?
        // while(!wakeUp && offMode) {
           // enable wakeup on any configured button pins
+          /*
           for(int i = 0; i < WLED_MAX_BUTTONS; i++) {
             if(btnPin[i] >= 0 && buttonType[i] > BTN_TYPE_RESERVED && buttonType[i] < BTN_TYPE_TOUCH) { // TODO: add touch button support for S3 and S2
               #if defined(CONFIG_IDF_TARGET_ESP32C3) // ESP32 C3
@@ -104,6 +133,7 @@ class LightSleepUsermod : public Usermod {
             esp_light_sleep_start();  // Enter light sleep  No light sleep: about 30mA, with light sleep: 15mA
           else
             skipcounter = 5000;
+            */
           // we woke up, check if we should go back to sleep
           //check wakeup reason
           /*
@@ -116,15 +146,15 @@ class LightSleepUsermod : public Usermod {
           {
               wakeUp = true; // wake up if button or timeout triggered and run the main loop
           }*/
-
+/*
           if(WLED_WIFI_CONFIGURED) {
             if(WiFi.status() != WL_CONNECTED) { //not connected, reconnect
               //WiFi.reconnect();
               //WLED::instance().handleConnection(); // check wifi state, re-connect if necessary
               WLED::instance().initConnection();
               skipcounter = 2000; // run main loop a few times before going back to sleep (otherwise wifi breaks) 200 works for wifi but AP does not start, 2000 works with AP
-              }
-          }
+              }*/
+         // }
 
         //}
         didSleep = true;
