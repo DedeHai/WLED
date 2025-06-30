@@ -195,9 +195,8 @@ static uint8_t binNum = 8;           // Used to select the bin for FFT based bea
 #define UM_AUDIOREACTIVE_USE_ARDUINO_FFT // DSP FFT library is not available in ESP-IDF < 4.4
 #endif
 
-//TODO: is the sqrt of any use for DSP FFT?
-#define sqrt(x) sqrtf(x)                // little hack that reduces FFT time by 10-50% on ESP32 (as alternative to FFT_SQRT_APPROXIMATION)
 #ifdef UM_AUDIOREACTIVE_USE_ARDUINO_FFT
+#define sqrt(x) sqrtf(x)                // little hack that reduces FFT time by 10-50% on ESP32 (as alternative to FFT_SQRT_APPROXIMATION)
 #define sqrt_internal sqrtf             // see https://github.com/kosme/arduinoFFT/pull/83
 #include <arduinoFFT.h>                 // ArduinoFFT library for FFT and window functions
 #undef UM_AUDIOREACTIVE_USE_INTEGER_FFT // arduinoFFT has not integer support
@@ -630,7 +629,6 @@ void FFTcode(void * parameter)
   float *windowFloat = (float*) calloc(sizeof(float), samplesFFT); // temporary buffer for window function
   if ((windowFloat == nullptr)) return; // something went wrong
     switch(fftWindow) {                             // apply FFT window. note: DSPS windows use ~2k of flash
-    /*
     case 1:
       dsps_wind_hann_f32(windowFloat, samplesFFT);  // recommended for 50% overlap
       wc = 0.66415918066;     // 1.8554726898 * 2.0
@@ -650,7 +648,7 @@ void FFTcode(void * parameter)
     case 4:
         dsps_wind_flat_top_f32(windowFloat, samplesFFT);      // Weigh data using "Flat Top" function - better amplitude preservation, low frequency accuracy
       wc = 1.276771793156f;   // 3.5659039231 * 2.0
-    break;*/
+    break;
     case 0: // falls through
     default:
       dsps_wind_blackman_harris_f32(windowFloat, samplesFFT); // Weigh data using "Blackman- Harris" window - sharp peaks due to excellent sideband rejection
