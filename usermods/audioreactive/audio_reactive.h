@@ -795,7 +795,7 @@ void FFTcode(void * parameter)
 #endif
 
     #ifdef FFT_USE_SLIDING_WINDOW
-    memcpy(oldSamples, valFFT+samplesFFT_2, sizeof(float) * samplesFFT_2);  // copy last 50% to buffer (for sliding window FFT)
+    memcpy(oldSamples, valFFT+samplesFFT_2, sizeof(FFTsampleType) * samplesFFT_2);  // copy last 50% to buffer (for sliding window FFT)
     haveOldSamples = true;
     #endif
 
@@ -824,7 +824,7 @@ void FFTcode(void * parameter)
 #endif
       }
     }
-    newZeroCrossingCount = (newZeroCrossingCount*341)>>9; // multiply by 1/3 to reduce value so it typically stays below 256
+    newZeroCrossingCount = (newZeroCrossingCount*341)>>9; // multiply by 2/3 to reduce value so it typically stays below 256
     zeroCrossingCount = newZeroCrossingCount; // update only once, to avoid that effects pick up an intermediate value
 
     // release highest sample to volume reactive effects early - not strictly necessary here - could also be done at the end of the function
