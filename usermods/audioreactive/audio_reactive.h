@@ -67,8 +67,10 @@
 #endif
 
 // Analog mic with DMA ADC sampling is only supported on ESP32-S2, ESP32-C3 and ESP32-S3 on IDF >= 4.4.0
+#ifdef ARDUINO_ARCH_ESP32
 #if !defined(CONFIG_IDF_TARGET_ESP32) && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 0) && (defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32S3)))
 #define AR_DMA_ADC_SAMPLING
+#endif
 #endif
 
 // Comment/Uncomment to toggle usb serial debugging

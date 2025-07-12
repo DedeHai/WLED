@@ -947,7 +947,7 @@ class AC101Source : public I2SSource {
 
 };
 
-#if !defined(CONFIG_IDF_TARGET_ESP32) || !defined(AR_DMA_ADC_SAMPLING)
+#if !defined(CONFIG_IDF_TARGET_ESP32) && !defined(AR_DMA_ADC_SAMPLING)
   #warning this MCU does not support analog sound input on IDF versions < 4.4.0
 #endif
 
@@ -1207,7 +1207,7 @@ class DMAadcSource : public AudioSource {
       }
       _audioPin = audioPin;
       // Determine Analog channel. Only Channels on ADC1 are supported
-      int8_t channel = digitalPinToAnalogChannel(_audioPin);
+      uint8_t channel = digitalPinToAnalogChannel(_audioPin);
       if (channel > MAX_ADC1_CHANNEL) {
         DEBUGSR_PRINTF("Incompatible GPIO used for analog audio input: %d\n", _audioPin);
         return;
@@ -1223,9 +1223,6 @@ class DMAadcSource : public AudioSource {
     }
 
     void getSamples(float *buffer, uint16_t num_samples) {
-
-
-      Serial.println(ESP_IDF_VERSION);
       if (!_initialized) return;
       int32_t framesize = num_samples * ADC_RESULT_BYTE; // size of one sample frame in bytes
       uint8_t result[framesize]; // create a read buffer
