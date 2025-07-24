@@ -9744,7 +9744,7 @@ uint16_t mode_particleimpact(void) {
     PartSys->setBounceY(true); // always use ground bounce
     PartSys->setWallRoughness(220); // high roughness
     numMeteors = min(PartSys->numSources, (uint32_t)NUMBEROFSOURCES);
-    for (i = 0; i < numMeteors; i++) {
+    for (uint32_t i = 0; i < numMeteors; i++) {
       PartSys->sources[i].source.ttl = hw_random16(10 * i); // set initial delay for meteors
       PartSys->sources[i].source.vy = 10; // at positive speeds, no particles are emitted and if particle dies, it will be relaunched
     }
