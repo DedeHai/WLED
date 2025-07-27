@@ -840,7 +840,7 @@ class DMAadcSource : public AudioSource {
       _initialized = true;
     }
 
-    void getSamples(float *buffer, uint16_t num_samples) {
+    void getSamples(FFTsampleType *buffer, uint16_t num_samples) {
       int32_t framesize = num_samples * ADC_RESULT_BYTE; // size of one sample frame in bytes
       uint8_t result[framesize]; // create a read buffer
       uint32_t ret_num;
@@ -858,7 +858,7 @@ class DMAadcSource : public AudioSource {
             }
             for (int i = 0; i < ret_num; i += ADC_RESULT_BYTE) {
               adc_digi_output_data_t *p = reinterpret_cast<adc_digi_output_data_t*>(&result[i]);
-              buffer[j++] = float((int(p->val & 0x0FFF))); // get the 12bit sample data and convert to float note: works on both format types
+              buffer[j++] = FFTsampleType((int(p->val & 0x0FFF))); // get the 12bit sample data and convert to float note: works on both format types
               // TODO: for integer math: when scaling up to 16bit: compared to I2S mic the scaling seems about the same when not shifting at all, so need to divide by 16 after FFT if scaling up to 16bit
             }
           } else {  // no samples or other error: usually ESP_ERR_TIMEOUT (if DMA has stopped for some reason)
@@ -869,7 +869,6 @@ class DMAadcSource : public AudioSource {
         } while (totalbytes < framesize); // read more samples if a partial frame was returned (data is still consistent in split frames)
       }
 
-      // remove DC TODO: should really do this in int on C3 & S2... -> needs an update after PR #248 is merged
       int32_t sum = 0;
       for (int i = 0; i < num_samples; i++) sum += buffer[i];
       int32_t mean = sum / num_samples;
