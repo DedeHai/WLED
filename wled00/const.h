@@ -520,6 +520,16 @@ static_assert(WLED_MAX_BUSSES <= 32, "WLED_MAX_BUSSES exceeds hard limit");
   #endif
 #endif
 
+// milliamps used by ESP (for power estimation)
+// you can set it to 0 if the ESP is powered by USB and the LEDs by external
+#ifndef MA_FOR_ESP
+  #ifdef ESP8266
+    #define MA_FOR_ESP         80 //how much mA does the ESP use (Wemos D1 about 80mA)
+  #else
+    #define MA_FOR_ESP        120 //how much mA does the ESP use (ESP32 about 120mA)
+  #endif
+#endif
+
 // PWM settings
 #ifndef WLED_PWM_FREQ
 #ifdef ESP8266

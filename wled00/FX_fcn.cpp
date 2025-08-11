@@ -1555,12 +1555,17 @@ void WS2812FX::blendSegment(const Segment &topSegment) const {
   Segment::setClippingRect(0, 0);             // disable clipping for overlays
 }
 
+
+
 // To disable brightness limiter we either set output max current to 0 or single LED current to 0
 static uint8_t estimateCurrentAndLimitBri(uint8_t brightness, uint32_t *pixels) {
-  unsigned milliAmpsMax = BusManager::ablMilliampsMax();
-  if (milliAmpsMax > 0) {
+  unsigned milliAmpsMax  = BusManager::ablMilliampsMax();
+  bool usePerBusBriLimit = BusManager::usePerBusBriLimit();
+  /*
+  if (milliAmpsMax > 0 || usePerBusBriLimit) {
     unsigned milliAmpsTotal = 0;
     unsigned avgMilliAmpsPerLED = 0;
+    unsigned milliAmpsForESP = usePerBusBriLimit ? (MA_FOR_ESP/BusManager::getNumBusses()) : MA_FOR_ESP;
     unsigned lengthDigital = 0;
     bool useWackyWS2815PowerModel = false;
 
@@ -1568,13 +1573,13 @@ static uint8_t estimateCurrentAndLimitBri(uint8_t brightness, uint32_t *pixels) 
       const Bus *bus = BusManager::getBus(i);
       if (!(bus && bus->isDigital() && bus->isOk())) continue;
       unsigned maPL = bus->getLEDCurrent();
-      if (maPL == 0 || bus->getMaxCurrent() > 0) continue; // skip buses with 0 mA per LED or max current per bus defined (PP-ABL)
+      if (maPL == 0) continue; // skip buses with 0 mA per LED
       if (maPL == 255) {
         useWackyWS2815PowerModel = true;
         maPL = 12; // WS2815 uses 12mA per channel
       }
-      avgMilliAmpsPerLED += maPL * bus->getLength();
-      lengthDigital += bus->getLength();
+      milliAmpsTotal = maPL * bus->getLength();
+      lengthDigital += bus->getLength(); // count all LEDs on digital buses for global limiter
       // sum up the usage of each LED on digital bus
       uint32_t busPowerSum = 0;
       for (unsigned j = 0; j < bus->getLength(); j++) {
@@ -1586,13 +1591,14 @@ static uint8_t estimateCurrentAndLimitBri(uint8_t brightness, uint32_t *pixels) 
           busPowerSum += (r + g + b + w);
         }
       }
-      // RGBW led total output with white LEDs enabled is still 50mA, so each channel uses less
-      if (bus->hasWhite()) {
-        busPowerSum *= 3;
-        busPowerSum >>= 2; //same as /= 4
-      }
-      // powerSum has all the values of channels summed (max would be getLength()*765 as white is excluded) so convert to milliAmps
-      milliAmpsTotal += (busPowerSum * maPL * brightness) / (765*255);
+      // to estimate total current the formula busPowerSum * (maPL / LEDchannels)
+      // RGBW led total output with white LEDs enabled is still 50mA, so each channel uses less -> not according to Quinleds tables
+      //if (bus->hasWhite()) {
+      //  busPowerSum *= 3;
+      //  busPowerSum >>= 2; //same as /= 4
+      //}
+      // powerSum has all the values of channels summed (max would be getLength()*3*255) as white is excluded) so convert to milliAmps
+      milliAmpsTotal += (busPowerSum * maPL * brightness) / (765*255);  // TODO: this is unfinished!!!
     }
     if (lengthDigital > 0) {
       avgMilliAmpsPerLED /= lengthDigital;
@@ -1611,8 +1617,60 @@ static uint8_t estimateCurrentAndLimitBri(uint8_t brightness, uint32_t *pixels) 
         }
       }
     }
-  }
+  }*/
   return brightness;
+}
+
+// reorder _pixels[] according to led map, uses highest bit to track visited pixels (except for gaps) this leaves 32766 usable indices
+void WS2812FX::mapPixelsBuffer() {
+  constexpr uint16_t IS_GAP       = 0xFFFF; // gaps in the led map are -1
+  constexpr uint16_t VISITED_MASK = 0x8000; // use highest bit to track visited pixels
+  constexpr uint16_t INDEX_MASK   = 0x7FFF; // mask to blank out the visited bit
+  size_t totalLen = getLengthTotal();
+
+  if (realtimeMode == REALTIME_MODE_INACTIVE || realtimeRespectLedMaps) {
+    for (unsigned i = 0; i < totalLen; i++) {
+      if(i >= customMappingSize) continue; // safety check
+      uint16_t mapVal = customMappingTable[i];
+      if (mapVal == i || mapVal > _length) continue; // skip if self-mapped, already visited, gap or invalid
+
+      uint32_t temp = _pixels[i];
+      unsigned current = i;
+
+      while (true) {
+        uint16_t next = customMappingTable[current];
+        customMappingTable[current] |= VISITED_MASK; // mark as visited
+        if (next > _length) break; // already visited, gap or invalid
+
+        uint32_t swap = _pixels[next];
+        _pixels[next] = temp;
+        temp = swap;
+        current = next;
+      }
+
+      while (true) {
+        if (current >= customMappingSize) break;     // mapping index OOB
+        mapVal = customMappingTable[current];
+        if (mapVal & VISITED_MASK) break;            // already visited
+        if (mapVal == IS_GAP) break;                 // gap found
+
+        size_t next = mapVal & INDEX_MASK;
+        if (next >= totalLen) break;                 // pixel index OOB
+
+        customMappingTable[current] |= VISITED_MASK; // mark visited
+        _pixels[current] = _pixels[next];
+        current = next;
+      }
+      if (current < totalLen)
+        _pixels[current] = temp;
+    }
+
+    // clear visited flags
+    for (int i = 0; i < customMappingSize; i++) {
+      if (customMappingTable[i] != IS_GAP)
+        customMappingTable[i] &= INDEX_MASK;
+    }
+  }
 }
 
 void WS2812FX::show() {
@@ -1640,7 +1698,13 @@ void WS2812FX::show() {
   show_callback callback = _callback;
   if (callback) callback(); // will call setPixelColor or setRealtimePixelColor
 
+<<<<<<< Updated upstream
   // determine ABL brightness for all busses
+=======
+  mapPixelsBuffer(); // apply mapping
+
+  // determine ABL brightness
+>>>>>>> Stashed changes
   uint8_t newBri = estimateCurrentAndLimitBri(_brightness, _pixels);
 
   // paint actual pixels
@@ -1654,12 +1718,37 @@ void WS2812FX::show() {
       if (i == 0 || _pixelCCT[i-1] != _pixelCCT[i]) BusManager::setSegmentCCT(_pixelCCT[i], correctWB);
     }
 
+<<<<<<< Updated upstream
     uint32_t c = _pixels[i];
     if (c > 0 && !(realtimeMode && arlsDisableGammaCorrection))
       c = gamma32(c); // apply gamma correction if enabled note: applying gamma after brightness has too much color loss
 
     c = color_fade_inline(c, newBri, true);
     BusManager::setPixelColor(getMappedPixelIndex(i), c);
+=======
+    uint32_t c = _pixels[i]; // need a copy, do not modify _pixels directly (no byte access allowed on ESP32)
+    if(c > 0) {
+      if(!(realtimeMode && arlsDisableGammaCorrection))
+        c = gamma32(c); // apply gamma correction if enabled note: applying gamma after brightness has too much color loss
+      if(newBri < 255) {
+        // apply brightness note: could check if brightness is 255 and skip this step
+        uint8_t r = R(c), g = G(c), b = B(c), w = W(c);
+        uint32_t addRemains = 0;
+        // video scaling: make sure colors do not dim to zero if they started non-zero unless they distort the hue
+        // determine dominant channel for hue preservation
+        uint8_t maxc = (r > g) ? ((r > b) ? r : b) : ((g > b) ? g : b);
+        uint8_t quarterMax = maxc >> 2;
+        addRemains  = r && r > quarterMax ? 0x00010000 : 0;
+        addRemains |= g && g > quarterMax ? 0x00000100 : 0;
+        addRemains |= b && b > quarterMax ? 0x00000001 : 0;
+        const uint32_t TWO_CHANNEL_MASK = 0x00FF00FF;
+        uint32_t rb = (((c & TWO_CHANNEL_MASK) * newBri) >> 8) &  TWO_CHANNEL_MASK; // scale red and blue
+        uint32_t wg = (((c >> 8) & TWO_CHANNEL_MASK) * newBri) & ~TWO_CHANNEL_MASK; // scale white and green
+        c = (rb | wg) + addRemains;
+      }
+    }
+    BusManager::setPixelColor(i, c); //TODO: getmappedpixelindex is now unused, maye the setPixelColor can be optimized to do bus by bus?
+>>>>>>> Stashed changes
   }
   Bus::setCCT(oldCCT);  // restore old CCT for ABL adjustments
 
@@ -2010,7 +2099,13 @@ bool WS2812FX::deserializeMap(unsigned n) {
   if (n == 0 && (!root[F("width")].isNull() || !root[F("height")].isNull())) {
     Segment::maxWidth  = min(max(root[F("width")].as<int>(), 1), 255);
     Segment::maxHeight = min(max(root[F("height")].as<int>(), 1), 255);
-    isMatrix = true;
+    if(Segment::maxWidth * Segment::maxHeight > _length) {
+      Segment::maxWidth = _length; // invalid size, fall back to 1D
+      Segment::maxHeight = 1;
+      isMatrix = false;
+    }
+    else
+      isMatrix = true;
   }
 
   d_free(customMappingTable);
@@ -2034,7 +2129,7 @@ bool WS2812FX::deserializeMap(unsigned n) {
         } while (i < 32);
         if (!foundDigit) break;
         int index = atoi(number);
-        if (index < 0 || index > 16384) index = 0xFFFF;
+        if (index < 0 || index > 0x7FFF || index > _length) index = 0xFFFF; // invalid index: 15 bits max and on physical strip
         customMappingTable[customMappingSize++] = index;
         if (customMappingSize > getLengthTotal()) break;
       } else break; // there was nothing to read, stop

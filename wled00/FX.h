@@ -894,6 +894,7 @@ class WS2812FX {
       makeAutoSegments(bool forceReset = false),  // will create segments based on configured outputs
       fixInvalidSegments(),                       // fixes incorrect segment configuration
       blendSegment(const Segment &topSegment) const,    // blends topSegment into pixels
+      mapPixelsBuffer(),                          // reorders pixel buffer according to led map
       show(),                                     // initiates LED output
       setTargetFps(unsigned fps),
       setupEffectData(),                          // add default effects to the list; defined in FX.cpp

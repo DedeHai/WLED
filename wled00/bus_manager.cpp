@@ -184,6 +184,7 @@ BusDigital::BusDigital(const BusConfig &bc, uint8_t nr)
 //I am NOT to be held liable for burned down garages or houses!
 
 // To disable brightness limiter we either set output max current to 0 or single LED current to 0
+/*
 uint8_t BusDigital::estimateCurrentAndLimitBri() const {
   bool useWackyWS2815PowerModel = false;
   byte actualMilliampsPerLed = _milliAmpsPerLed;
@@ -233,12 +234,13 @@ uint8_t BusDigital::estimateCurrentAndLimitBri() const {
     //_milliAmpsTotal = (busPowerSum * actualMilliampsPerLed * newBri) / (765*255);
   }
   return newBri;
-}
+}*/
 
 void BusDigital::show() {
+
   BusDigital::_milliAmpsTotal = 0;
   if (!_valid) return;
-
+/*  TODO: this is unfinished, need to handle CCT pixels
   uint8_t cctWW = 0, cctCW = 0;
   unsigned newBri = estimateCurrentAndLimitBri();  // will fill _milliAmpsTotal (TODO: could use PolyBus::CalcTotalMilliAmpere())
   if (newBri < _bri) {
@@ -252,6 +254,7 @@ void BusDigital::show() {
       PolyBus::setPixelColor(_busPtr, _iType, i, c, 0, (cctCW<<8) | cctWW); // repaint all pixels with new brightness
     }
   }
+    */
   PolyBus::show(_busPtr, _iType, _skip); // faster if buffer consistency is not important (no skipped LEDs)
   // restore bus brightness to its original value
   // this is done right after show, so this is only OK if LED updates are completed before show() returns
@@ -289,7 +292,7 @@ void IRAM_ATTR BusDigital::setPixelColor(unsigned pix, uint32_t c) {
   if (_type == TYPE_WS2812_1CH_X3) { // map to correct IC, each controls 3 LEDs
     unsigned pOld = pix;
     pix = IC_INDEX_WS2812_1CH_3X(pix);
-    uint32_t cOld = restoreColorLossy(PolyBus::getPixelColor(_busPtr, _iType, pix, co),_bri);
+    uint32_t cOld = 0; // TOD: unfinished!!! restoreColorLossy(PolyBus::getPixelColor(_busPtr, _iType, pix, co),_bri);
     switch (pOld % 3) { // change only the single channel (TODO: this can cause loss because of get/set)
       case 0: c = RGBW32(R(cOld), W(c)   , B(cOld), 0); break;
       case 1: c = RGBW32(W(c)   , G(cOld), B(cOld), 0); break;
@@ -312,7 +315,7 @@ uint32_t IRAM_ATTR BusDigital::getPixelColor(unsigned pix) const {
   if (_reversed) pix = _len - pix -1;
   pix += _skip;
   const unsigned co = _colorOrderMap.getPixelColorOrder(pix+_start, _colorOrder);
-  uint32_t c = restoreColorLossy(PolyBus::getPixelColor(_busPtr, _iType, (_type==TYPE_WS2812_1CH_X3) ? IC_INDEX_WS2812_1CH_3X(pix) : pix, co),_bri);
+  uint32_t c = 0; // TODO: unfinished!!! restoreColorLossy(PolyBus::getPixelColor(_busPtr, _iType, (_type==TYPE_WS2812_1CH_X3) ? IC_INDEX_WS2812_1CH_3X(pix) : pix, co),_bri);
   if (_type == TYPE_WS2812_1CH_X3) { // map to correct IC, each controls 3 LEDs
     unsigned r = R(c);
     unsigned g = _reversed ? B(c) : G(c); // should G and B be switched if _reversed?
@@ -945,6 +948,14 @@ void BusManager::show() {
     bus->show();
     _gMilliAmpsUsed += bus->getUsedCurrent();
   }
+}
+
+bool BusManager::usePerBusBriLimit() {
+  for (auto &bus : busses) {
+    if (!(bus && bus->isDigital() && bus->isOk())) continue;
+    if (bus->getLEDCurrent() > 0 && bus->getMaxCurrent() > 0) return true; // at least one bus has limit set
+  }
+  return false; // per bus limit not set
 }
 
 void IRAM_ATTR BusManager::setPixelColor(unsigned pix, uint32_t c) {

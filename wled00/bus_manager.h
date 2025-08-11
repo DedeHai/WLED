@@ -266,19 +266,6 @@ class BusDigital : public Bus {
     void    *_busPtr;
 
     static uint16_t _milliAmpsTotal; // is overwitten/recalculated on each show()
-
-    inline uint32_t restoreColorLossy(uint32_t c, uint8_t restoreBri) const {
-      if (restoreBri < 255) {
-        uint8_t* chan = (uint8_t*) &c;
-        for (uint_fast8_t i=0; i<4; i++) {
-          uint_fast16_t val = chan[i];
-          chan[i] = ((val << 8) + restoreBri) / (restoreBri + 1); //adding _bri slightly improves recovery / stops degradation on re-scale
-        }
-      }
-      return c;
-    }
-
-    uint8_t  estimateCurrentAndLimitBri() const;
 };
 
 
@@ -411,17 +398,6 @@ struct BusConfig {
   size_t memUsage(unsigned nr = 0) const;
 };
 
-
-//fine tune power estimation constants for your setup
-//you can set it to 0 if the ESP is powered by USB and the LEDs by external
-#ifndef MA_FOR_ESP
-  #ifdef ESP8266
-    #define MA_FOR_ESP         80 //how much mA does the ESP use (Wemos D1 about 80mA)
-  #else
-    #define MA_FOR_ESP        120 //how much mA does the ESP use (ESP32 about 120mA)
-  #endif
-#endif
-
 namespace BusManager {
 
   extern std::vector<std::unique_ptr<Bus>> busses;
@@ -443,6 +419,7 @@ namespace BusManager {
   //inline uint16_t ablMilliampsMax()             { unsigned sum = 0; for (auto &bus : busses) sum += bus->getMaxCurrent(); return sum; }
   inline uint16_t ablMilliampsMax()             { return _gMilliAmpsMax; }  // used for compatibility reasons (and enabling virtual global ABL)
   inline void     setMilliampsMax(uint16_t max) { _gMilliAmpsMax = max;}
+  bool            usePerBusBriLimit(); // returns true if at least one bus has current limit set
 
   void useParallelOutput(); // workaround for inaccessible PolyBus
   bool hasParallelOutput(); // workaround for inaccessible PolyBus
