@@ -156,12 +156,17 @@ struct CHSV32 { // 32bit HSV color with 16bit hue for more accurate conversions
 // similar to NeoPixelBus NeoGammaTableMethod but allows dynamic changes (superseded by NPB::NeoGammaDynamicTableMethod)
 class NeoGammaWLEDMethod {
   public:
-    [[gnu::hot]] static uint8_t Correct(uint8_t value);         // apply Gamma to single channel
-    [[gnu::hot]] static uint32_t Correct32(uint32_t color);     // apply Gamma to RGBW32 color (WLED specific, not used by NPB)
-    [[gnu::hot]] static uint32_t inverseGamma32(uint32_t color); // apply inverse Gamma to RGBW32 color
-    static void calcGammaTable(float gamma);                    // re-calculates & fills gamma tables
+    [[gnu::hot]] static uint8_t Correct(uint8_t value);             // apply Gamma to single channel
+    [[gnu::hot]] static uint32_t inverseGamma32(uint32_t color);    // apply inverse Gamma to RGBW32 color
+    static void calcGammaTable(float gamma);                        // re-calculates & fills gamma tables
     static inline uint8_t rawGamma8(uint8_t val) { return gammaT[val]; }  // get value from Gamma table (WLED specific, not used by NPB)
     static inline uint8_t rawInverseGamma8(uint8_t val) { return gammaT_inv[val]; }  // get value from inverse Gamma table (WLED specific, not used by NPB)
+    static inline uint32_t Correct32(uint32_t color) { // apply Gamma to RGBW32 color (WLED specific, not used by NPB)
+      if (!gammaCorrectCol) return color; // no gamma correction
+      uint8_t r = byte(color>>16), g = byte(color>>8), b = byte(color), w = byte(color>>24); // extract r, g, b, w channels
+      w = gammaT[w]; r = gammaT[r]; g = gammaT[g]; b = gammaT[b];
+      return (uint32_t(w) << 24) | (uint32_t(r) << 16) | (uint32_t(g) << 8) | uint32_t(b);
+    }
   private:
     static uint8_t gammaT[];
     static uint8_t gammaT_inv[];
@@ -173,7 +178,6 @@ class NeoGammaWLEDMethod {
 [[gnu::hot, gnu::pure]] uint32_t color_blend(uint32_t c1, uint32_t c2 , uint8_t blend);
 inline uint32_t color_blend16(uint32_t c1, uint32_t c2, uint16_t b) { return color_blend(c1, c2, b >> 8); };
 [[gnu::hot, gnu::pure]] uint32_t color_add(uint32_t, uint32_t, bool preserveCR = false);
-[[gnu::hot, gnu::pure]] uint32_t color_fade(uint32_t c1, uint8_t amount, bool video=false);
 [[gnu::hot, gnu::pure]] uint32_t adjust_color(uint32_t rgb, uint32_t hueShift, uint32_t lighten, uint32_t brighten);
 [[gnu::hot, gnu::pure]] uint32_t ColorFromPaletteWLED(const CRGBPalette16 &pal, unsigned index, uint8_t brightness = (uint8_t)255U, TBlendType blendType = LINEARBLEND);
 CRGBPalette16 generateHarmonicRandomPalette(const CRGBPalette16 &basepalette);
@@ -195,6 +199,32 @@ bool colorFromHexString(byte* rgb, const char* in);
 uint32_t colorBalanceFromKelvin(uint16_t kelvin, uint32_t rgb);
 uint16_t approximateKelvinFromRGB(uint32_t rgb);
 void setRandomColor(byte* rgb);
+
+// color_fade() fades color toward black, use _inline if performace matters over code size
+// if using "video" method the resulting color will never become black unless it is already black
+__attribute__((always_inline)) inline uint32_t color_fade_inline(uint32_t c1, uint8_t amount, bool video) {
+  if (c1 == 0 || amount == 0) return 0; // black or no change
+  if (amount == 255) return c1;
+  uint32_t addRemains = 0;
+
+  if (!video) amount++; // add one for correct scaling using bitshifts
+  else {
+    // video scaling: make sure colors do not dim to zero if they started non-zero unless they distort the hue
+    uint8_t r = byte(c1>>16), g = byte(c1>>8), b = byte(c1), w = byte(c1>>24); // extract r, g, b, w channels
+    uint8_t maxc = (r > g) ? ((r > b) ? r : b) : ((g > b) ? g : b); // determine dominant channel for hue preservation
+    uint8_t quarterMax = maxc >> 2; // note: using half of max results in color artefacts
+    addRemains  = r && r > quarterMax ? 0x00010000 : 0;
+    addRemains |= g && g > quarterMax ? 0x00000100 : 0;
+    addRemains |= b && b > quarterMax ? 0x00000001 : 0;
+    addRemains |= w ? 0x01000000 : 0;
+  }
+  const uint32_t TWO_CHANNEL_MASK = 0x00FF00FF;
+  uint32_t rb = (((c1 & TWO_CHANNEL_MASK) * amount) >> 8) &  TWO_CHANNEL_MASK; // scale red and blue
+  uint32_t wg = (((c1 >> 8) & TWO_CHANNEL_MASK) * amount) & ~TWO_CHANNEL_MASK; // scale white and green
+  return (rb | wg) + addRemains;
+}
+
+[[gnu::hot, gnu::pure]] uint32_t color_fade(uint32_t c1, uint8_t amount, bool video = false) { return color_fade_inline(c1, amount, video); }
 
 //dmx_output.cpp
 void initDMXOutput();

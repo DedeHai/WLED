@@ -242,7 +242,7 @@ void BusDigital::show() {
   uint8_t cctWW = 0, cctCW = 0;
   unsigned newBri = estimateCurrentAndLimitBri();  // will fill _milliAmpsTotal (TODO: could use PolyBus::CalcTotalMilliAmpere())
   if (newBri < _bri) {
-    PolyBus::setBrightness(_busPtr, _iType, newBri); // limit brightness to stay within current limits
+    //PolyBus::setBrightness(_busPtr, _iType, newBri); // limit brightness to stay within current limits
     unsigned hwLen = _len;
     if (_type == TYPE_WS2812_1CH_X3) hwLen = NUM_ICS_WS2812_1CH_3X(_len); // only needs a third of "RGB" LEDs for NeoPixelBus
     for (unsigned i = 0; i < hwLen; i++) {
@@ -256,7 +256,7 @@ void BusDigital::show() {
   // restore bus brightness to its original value
   // this is done right after show, so this is only OK if LED updates are completed before show() returns
   // or async show has a separate buffer (ESP32 RMT and I2S are ok)
-  if (newBri < _bri) PolyBus::setBrightness(_busPtr, _iType, _bri);
+  //if (newBri < _bri) PolyBus::setBrightness(_busPtr, _iType, _bri);
 }
 
 bool BusDigital::canShow() const {
