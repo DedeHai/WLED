@@ -23,6 +23,76 @@
  * This is an audioreactive v2 usermod.
  * ....
  */
+//#define USE_GEQ7_BANDPASS
+
+
+#ifdef USE_GEQ7_BANDPASS
+
+#define NUM_BANDS 7
+#define ORDER 1      // 1 = single biquad, 2 = cascade two for steeper slope but more CPU time
+#define FS 22000.0f
+#define FILTER_Q 5.0f
+float centerFreqs[NUM_BANDS] = {110, 250, 500, 1000, 2000, 4000, 8000};
+// Coefficients for each biquad [b0, b1, b2, a1, a2]
+float coeffs[NUM_BANDS][5];
+// Filter states: for each band, 2 cascades, 2 delay samples each
+float z[NUM_BANDS][ORDER][2];
+// Band output levels (envelope)
+float bandLevels[NUM_BANDS];
+
+// Compute biquad bandpass coefficients
+void biquad_bandpass(float f0, float q, float *c) {
+    float w0 = 2.0f * M_PI * f0 / FS;
+    float alpha = sinf(w0) / (2.0f * q);
+
+    float b0 =   alpha;
+    float b1 =   0.0f;
+    float b2 =  -alpha;
+    float a0 =   1.0f + alpha;
+    float a1 =  -2.0f * cosf(w0);
+    float a2 =   1.0f - alpha;
+
+    // Normalize
+    c[0] = b0 / a0;
+    c[1] = b1 / a0;
+    c[2] = b2 / a0;
+    c[3] = a1 / a0;
+    c[4] = a2 / a0;
+}
+
+// Init all bands
+void init_filters() {
+    for (int i = 0; i < NUM_BANDS; i++) {
+        biquad_bandpass(centerFreqs[i], FILTER_Q, coeffs[i]);
+        for (int j = 0; j < ORDER; j++) {
+            z[i][j][0] = 0.0f;
+            z[i][j][1] = 0.0f;
+        }
+        bandLevels[i] = 0.0f;
+    }
+}
+
+// Process one sample through one biquad filter
+static inline float process_biquad(float in, float *c, float *s) {
+    float out = c[0] * in + s[0];
+    s[0] = c[1] * in - c[3] * out + s[1];
+    s[1] = c[2] * in - c[4] * out;
+    return out;
+}
+
+// Process one sample across all bands
+void process_sample(float sample) {
+    for (int i = 0; i < NUM_BANDS; i++) {
+        float y = sample;
+        for (int stage = 0; stage < ORDER; stage++) {
+            y = process_biquad(y, coeffs[i], z[i][stage]);
+        }
+        float env = fabsf(y);
+        if(bandLevels[i] < env) bandLevels[i] = env; // instant onset
+        else bandLevels[i] = 0.98f * bandLevels[i] + 0.02f * env; // low pass filter for decay
+    }
+}
+#endif
 
 #define FFT_PREFER_EXACT_PEAKS  // use Blackman-Harris FFT windowing instead of Flat Top -> results in "sharper" peaks and less "leaking" into other frequencies (credits to @softhack)
 
@@ -345,6 +415,12 @@ void FFTcode(void * parameter)
   // see https://www.freertos.org/vtaskdelayuntil.html
   const TickType_t xFrequency = FFT_MIN_CYCLE * portTICK_PERIOD_MS;  
 
+  
+  #ifdef USE_GEQ7_BANDPASS
+  init_filters();
+  #endif
+
+
   TickType_t xLastWakeTime = xTaskGetTickCount();
   for(;;) {
     delay(1);           // DO NOT DELETE THIS LINE! It is needed to give the IDLE(0) task enough time and to keep the watchdog happy.
@@ -373,6 +449,26 @@ void FFTcode(void * parameter)
 #endif
 
     xLastWakeTime = xTaskGetTickCount();       // update "last unblocked time" for vTaskDelay
+
+    #ifdef USE_GEQ7_BANDPASS
+    runMicFilter(samplesFFT, valFFT);
+    for(int i = 0; i < samplesFFT; i++) {
+      // process each sample through all bandpass filters
+      process_sample(valFFT[i]); // process each sample
+    }
+
+    for (int i=0; i < NUM_BANDS-2; i++) {
+      fftCalc[i*2] = bandLevels[i];
+      fftCalc[i*2+1] = bandLevels[i];
+    }
+    fftCalc[10] = bandLevels[NUM_BANDS-2];
+    fftCalc[11] = bandLevels[NUM_BANDS-2];
+    fftCalc[12] = bandLevels[NUM_BANDS-2];
+    fftCalc[13] = bandLevels[NUM_BANDS-1];
+    fftCalc[14] = bandLevels[NUM_BANDS-1];
+    fftCalc[15] = bandLevels[NUM_BANDS-1];
+    sampleAvg = 0.5; // open noise gate for testing (enables important post processing options)
+    #else
 
     // band pass filter - can reduce noise floor by a factor of 50 and avoid aliasing effects to base & high frequency bands
     // downside: frequencies below 100Hz will be ignored
@@ -549,6 +645,7 @@ void FFTcode(void * parameter)
         if (fftCalc[i] < 4.0f) fftCalc[i] = 0.0f;
       }
     }
+#endif // USE_GEQ7_BANDPASS
 
     // post-processing of frequency channels (pink noise adjustment, AGC, smoothing, scaling)
     postProcessFFTResults((fabsf(sampleAvg) > 0.25f)? true : false , NUM_GEQ_CHANNELS);
@@ -582,8 +679,8 @@ static void runMicFilter(uint16_t numSamples, FFTsampleType *sampleBuffer)      
   //constexpr float alpha = 0.04f;   // 150Hz
   //constexpr float alpha = 0.03f;   // 110Hz
   //constexpr float alpha = 0.0285f; //100Hz
-  constexpr float alpha = 0.0256f; //90Hz
-  //constexpr float alpha = 0.0225f; // 80hz
+  //constexpr float alpha = 0.0256f; //90Hz
+  constexpr float alpha = 0.0225f; // 80hz
   //constexpr float alpha = 0.01693f;// 60hz
   // high frequency cutoff  parameter
   //constexpr float beta1 = 0.75f;   // 11Khz
