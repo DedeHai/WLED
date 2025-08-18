@@ -61,6 +61,14 @@ uint32_t color_add(uint32_t c1, uint32_t c2, bool preserveCR)
 }
 
 /*
+ * fades color toward black
+ * if using "video" method the resulting color will never become black unless it is already black
+ */
+uint32_t color_fade(uint32_t c1, uint8_t amount, bool video) {
+  return color_fade_inline(c1, amount, video);
+}
+
+/*
  * color adjustment in HSV color space (converts RGB to HSV and back), color conversions are not 100% accurate!
    shifts hue, increase brightness, decreases saturation (if not black)
    note: inputs are 32bit to speed up the function, useful input value ranges are 0-255

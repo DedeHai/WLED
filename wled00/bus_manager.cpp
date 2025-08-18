@@ -20,6 +20,7 @@
 #include "core_esp8266_waveform.h"
 #endif
 #include "const.h"
+#include "colors.h"
 #include "pin_manager.h"
 #include "bus_manager.h"
 #include "bus_wrapper.h"
@@ -234,32 +235,28 @@ uint8_t BusDigital::estimateCurrentAndLimitBri() const {
     //_milliAmpsTotal = (busPowerSum * actualMilliampsPerLed * newBri) / (765*255);
   }
   return newBri;
-}*/
+}
 
+*/
 void BusDigital::show() {
 
-  BusDigital::_milliAmpsTotal = 0;
+  BusDigital::_milliAmpsTotal = 0; // TODO: need to calculate this here.
   if (!_valid) return;
-/*  TODO: this is unfinished, need to handle CCT pixels
+
   uint8_t cctWW = 0, cctCW = 0;
-  unsigned newBri = estimateCurrentAndLimitBri();  // will fill _milliAmpsTotal (TODO: could use PolyBus::CalcTotalMilliAmpere())
-  if (newBri < _bri) {
-    //PolyBus::setBrightness(_busPtr, _iType, newBri); // limit brightness to stay within current limits
+  if (_bri < 255) {
     unsigned hwLen = _len;
     if (_type == TYPE_WS2812_1CH_X3) hwLen = NUM_ICS_WS2812_1CH_3X(_len); // only needs a third of "RGB" LEDs for NeoPixelBus
     for (unsigned i = 0; i < hwLen; i++) {
       // use 0 as color order, actual order does not matter here as we just update the channel values as-is
-      uint32_t c = restoreColorLossy(PolyBus::getPixelColor(_busPtr, _iType, i, 0), _bri);
+      uint32_t c = PolyBus::getPixelColor(_busPtr, _iType, i, 0);
+      c = color_fade_inline(c, _bri, true); // apply bus brightness (updated in WS2812FX::show())
       if (hasCCT()) Bus::calculateCCT(c, cctWW, cctCW); // this will unfortunately corrupt (segment) CCT data on every bus
       PolyBus::setPixelColor(_busPtr, _iType, i, c, 0, (cctCW<<8) | cctWW); // repaint all pixels with new brightness
     }
   }
-    */
+
   PolyBus::show(_busPtr, _iType, _skip); // faster if buffer consistency is not important (no skipped LEDs)
-  // restore bus brightness to its original value
-  // this is done right after show, so this is only OK if LED updates are completed before show() returns
-  // or async show has a separate buffer (ESP32 RMT and I2S are ok)
-  //if (newBri < _bri) PolyBus::setBrightness(_busPtr, _iType, _bri);
 }
 
 bool BusDigital::canShow() const {
@@ -270,7 +267,6 @@ bool BusDigital::canShow() const {
 void BusDigital::setBrightness(uint8_t b) {
   if (_bri == b) return;
   Bus::setBrightness(b);
-  PolyBus::setBrightness(_busPtr, _iType, b);
 }
 
 //If LEDs are skipped, it is possible to use the first as a status LED.
@@ -292,12 +288,15 @@ void IRAM_ATTR BusDigital::setPixelColor(unsigned pix, uint32_t c) {
   if (_type == TYPE_WS2812_1CH_X3) { // map to correct IC, each controls 3 LEDs
     unsigned pOld = pix;
     pix = IC_INDEX_WS2812_1CH_3X(pix);
-    uint32_t cOld = 0; // TOD: unfinished!!! restoreColorLossy(PolyBus::getPixelColor(_busPtr, _iType, pix, co),_bri);
+    uint32_t cOld = PolyBus::getPixelColor(_busPtr, _iType, pix, co);
     switch (pOld % 3) { // change only the single channel (TODO: this can cause loss because of get/set)
       case 0: c = RGBW32(R(cOld), W(c)   , B(cOld), 0); break;
       case 1: c = RGBW32(W(c)   , G(cOld), B(cOld), 0); break;
       case 2: c = RGBW32(R(cOld), G(cOld), W(c)   , 0); break;
     }
+  }
+  if(BusManager::_useABL) {
+    // if using ABL, sum all color channels to later estimate current and limit brighntess if necessary
   }
   uint16_t wwcw = 0;
   if (hasCCT()) {
@@ -945,8 +944,11 @@ void BusManager::off() {
 void BusManager::show() {
   _gMilliAmpsUsed = 0;
   for (auto &bus : busses) {
-    bus->show();
     _gMilliAmpsUsed += bus->getUsedCurrent();
+  }
+  //TODO: apply ABL here
+  for (auto &bus : busses) {
+    bus->show();
   }
 }
 
@@ -1002,3 +1004,4 @@ uint16_t BusDigital::_milliAmpsTotal = 0;
 std::vector<std::unique_ptr<Bus>> BusManager::busses;
 uint16_t BusManager::_gMilliAmpsUsed = 0;
 uint16_t BusManager::_gMilliAmpsMax = ABL_MILLIAMPS_DEFAULT;
+bool BusManager::_useABL = false;
