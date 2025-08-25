@@ -102,7 +102,7 @@ class NeoGammaWLEDMethod {
     static inline uint8_t rawInverseGamma8(uint8_t val) { return gammaT_inv[val]; }  // get value from inverse Gamma table (WLED specific, not used by NPB)
     static inline uint32_t Correct32(uint32_t color) { // apply Gamma to RGBW32 color (WLED specific, not used by NPB)
       if (!gammaCorrectCol) return color; // no gamma correction
-      uint8_t r = byte(color>>16), g = byte(color>>8), b = byte(color), w = byte(color>>24); // extract r, g, b, w channels
+      uint8_t  w = byte(color>>24), r = byte(color>>16), g = byte(color>>8), b = byte(color); // extract r, g, b, w channels
       w = gammaT[w]; r = gammaT[r]; g = gammaT[g]; b = gammaT[b];
       return (uint32_t(w) << 24) | (uint32_t(r) << 16) | (uint32_t(g) << 8) | uint32_t(b);
     }
@@ -142,7 +142,7 @@ void setRandomColor(byte* rgb);
 // color_fade() fades color toward black, use _inline if performace matters over code size
 // if using "video" method the resulting color will never become black unless it is already black
 __attribute__((always_inline)) inline uint32_t color_fade_inline(uint32_t c1, uint8_t amount, bool video) {
-  if (c1 == 0 || amount == 0) return 0; // black or no change
+  if (c1 == 0) return 0; // black or no change
   if (amount == 255) return c1;
   uint32_t addRemains = 0;
 

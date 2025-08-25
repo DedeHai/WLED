@@ -1196,8 +1196,9 @@ void WS2812FX::finalizeInit() {
     if (busEnd > _length) _length = busEnd;
     // This must be done after all buses have been created, as some kinds (parallel I2S) interact
     bus->begin();
-    bus->setBrightness(bri);
+    bus->setBrightness(scaledBri(bri));
   }
+  BusManager::initializeABL(); // init ABL and distribute power budget if global ABL is used
   DEBUG_PRINTF_P(PSTR("Heap after buses: %d\n"), ESP.getFreeHeap());
 
   Segment::maxWidth  = _length;
@@ -1299,7 +1300,7 @@ static uint8_t _add       (uint8_t a, uint8_t b) { unsigned t = a + b; return t 
 static uint8_t _subtract  (uint8_t a, uint8_t b) { return b > a ? (b - a) : 0; }
 static uint8_t _difference(uint8_t a, uint8_t b) { return b > a ? (b - a) : (a - b); }
 static uint8_t _average   (uint8_t a, uint8_t b) { return (a + b) >> 1; }
-#ifdef CONFIG_IDF_TARGET_ESP32C3
+#if defined(ESP8266) || defined(CONFIG_IDF_TARGET_ESP32C3)
 static uint8_t _multiply  (uint8_t a, uint8_t b) { return ((a * b) + 255) >> 8; } // faster than division on C3 but slightly less accurate
 #else
 static uint8_t _multiply  (uint8_t a, uint8_t b) { return (a * b) / 255; } // origianl uses a & b in range [0,1]
@@ -1310,10 +1311,10 @@ static uint8_t _darken    (uint8_t a, uint8_t b) { return a < b ? a : b; }
 static uint8_t _screen    (uint8_t a, uint8_t b) { return 255 - _multiply(~a,~b); } // 255 - (255-a)*(255-b)/255
 static uint8_t _overlay   (uint8_t a, uint8_t b) { return b < 128 ? 2 * _multiply(a,b) : (255 - 2 * _multiply(~a,~b)); }
 static uint8_t _hardlight (uint8_t a, uint8_t b) { return a < 128 ? 2 * _multiply(a,b) : (255 - 2 * _multiply(~a,~b)); }
-#ifdef CONFIG_IDF_TARGET_ESP32C3
-static uint8_t _softlight (uint8_t a, uint8_t b) { return (((b * b * (255 - 2 * a) + 255) >> 8) + 2 * a * b + 255) >> 8; } // Pegtop's formula (1 - 2a)b^2 + 2ab
+#if defined(ESP8266) || defined(CONFIG_IDF_TARGET_ESP32C3)
+static uint8_t _softlight (uint8_t a, uint8_t b) { return (((b * b * (255 - 2 * a))) + ((2 * a * b + 256) << 8)) >> 16; } // Pegtop's formula (1 - 2a)b^2 + 2ab
 #else
-static uint8_t _softlight (uint8_t a, uint8_t b) { return (b * b * (255 - 2 * a) / 255 + 2 * a * b) / 255; } // Pegtop's formula (1 - 2a)b^2 + 2ab
+static uint8_t _softlight (uint8_t a, uint8_t b) { return (b * b * (255 - 2 * a) + 255 * 2 * a * b) / (255 * 255); } // Pegtop's formula (1 - 2a)b^2 + 2ab
 #endif
 static uint8_t _dodge     (uint8_t a, uint8_t b) { return _divide(~a,b); }
 static uint8_t _burn      (uint8_t a, uint8_t b) { return ~_divide(a,~b); }
@@ -1555,124 +1556,6 @@ void WS2812FX::blendSegment(const Segment &topSegment) const {
   Segment::setClippingRect(0, 0);             // disable clipping for overlays
 }
 
-
-
-// To disable brightness limiter we either set output max current to 0 or single LED current to 0
-static uint8_t estimateCurrentAndLimitBri(uint8_t brightness, uint32_t *pixels) {
-  unsigned milliAmpsMax  = BusManager::ablMilliampsMax();
-  bool usePerBusBriLimit = BusManager::usePerBusBriLimit();
-  /*
-  if (milliAmpsMax > 0 || usePerBusBriLimit) {
-    unsigned milliAmpsTotal = 0;
-    unsigned avgMilliAmpsPerLED = 0;
-    unsigned milliAmpsForESP = usePerBusBriLimit ? (MA_FOR_ESP/BusManager::getNumBusses()) : MA_FOR_ESP;
-    unsigned lengthDigital = 0;
-    bool useWackyWS2815PowerModel = false;
-
-    for (size_t i = 0; i < BusManager::getNumBusses(); i++) {
-      const Bus *bus = BusManager::getBus(i);
-      if (!(bus && bus->isDigital() && bus->isOk())) continue;
-      unsigned maPL = bus->getLEDCurrent();
-      if (maPL == 0) continue; // skip buses with 0 mA per LED
-      if (maPL == 255) {
-        useWackyWS2815PowerModel = true;
-        maPL = 12; // WS2815 uses 12mA per channel
-      }
-      milliAmpsTotal = maPL * bus->getLength();
-      lengthDigital += bus->getLength(); // count all LEDs on digital buses for global limiter
-      // sum up the usage of each LED on digital bus
-      uint32_t busPowerSum = 0;
-      for (unsigned j = 0; j < bus->getLength(); j++) {
-        uint32_t c = pixels[j + bus->getStart()];
-        byte r = R(c), g = G(c), b = B(c), w = W(c);
-        if (useWackyWS2815PowerModel) { //ignore white component on WS2815 power calculation
-          busPowerSum += (max(max(r,g),b)) * 3;
-        } else {
-          busPowerSum += (r + g + b + w);
-        }
-      }
-      // to estimate total current the formula busPowerSum * (maPL / LEDchannels)
-      // RGBW led total output with white LEDs enabled is still 50mA, so each channel uses less -> not according to Quinleds tables
-      //if (bus->hasWhite()) {
-      //  busPowerSum *= 3;
-      //  busPowerSum >>= 2; //same as /= 4
-      //}
-      // powerSum has all the values of channels summed (max would be getLength()*3*255) as white is excluded) so convert to milliAmps
-      milliAmpsTotal += (busPowerSum * maPL * brightness) / (765*255);  // TODO: this is unfinished!!!
-    }
-    if (lengthDigital > 0) {
-      avgMilliAmpsPerLED /= lengthDigital;
-
-      if (milliAmpsMax > MA_FOR_ESP && avgMilliAmpsPerLED > 0) { //0 mA per LED and too low numbers turn off calculation
-        unsigned powerBudget = (milliAmpsMax - MA_FOR_ESP); //80/120mA for ESP power
-        if (powerBudget > lengthDigital) { //each LED uses about 1mA in standby, exclude that from power budget
-          powerBudget -= lengthDigital;
-        } else {
-          powerBudget = 0;
-        }
-        if (milliAmpsTotal > powerBudget) {
-          //scale brightness down to stay in current limit
-          unsigned scaleB = powerBudget * 255 / milliAmpsTotal;
-          brightness = ((brightness * scaleB) >> 8) + 1;
-        }
-      }
-    }
-  }*/
-  return brightness;
-}
-
-// reorder _pixels[] according to led map, uses highest bit to track visited pixels (except for gaps) this leaves 32766 usable indices
-void WS2812FX::mapPixelsBuffer() {
-  constexpr uint16_t IS_GAP       = 0xFFFF; // gaps in the led map are -1
-  constexpr uint16_t VISITED_MASK = 0x8000; // use highest bit to track visited pixels
-  constexpr uint16_t INDEX_MASK   = 0x7FFF; // mask to blank out the visited bit
-  size_t totalLen = getLengthTotal();
-
-  if (realtimeMode == REALTIME_MODE_INACTIVE || realtimeRespectLedMaps) {
-    for (unsigned i = 0; i < totalLen; i++) {
-      if(i >= customMappingSize) continue; // safety check
-      uint16_t mapVal = customMappingTable[i];
-      if (mapVal == i || mapVal > _length) continue; // skip if self-mapped, already visited, gap or invalid
-
-      uint32_t temp = _pixels[i];
-      unsigned current = i;
-
-      while (true) {
-        uint16_t next = customMappingTable[current];
-        customMappingTable[current] |= VISITED_MASK; // mark as visited
-        if (next > _length) break; // already visited, gap or invalid
-
-        uint32_t swap = _pixels[next];
-        _pixels[next] = temp;
-        temp = swap;
-        current = next;
-      }
-
-      while (true) {
-        if (current >= customMappingSize) break;     // mapping index OOB
-        mapVal = customMappingTable[current];
-        if (mapVal & VISITED_MASK) break;            // already visited
-        if (mapVal == IS_GAP) break;                 // gap found
-
-        size_t next = mapVal & INDEX_MASK;
-        if (next >= totalLen) break;                 // pixel index OOB
-
-        customMappingTable[current] |= VISITED_MASK; // mark visited
-        _pixels[current] = _pixels[next];
-        current = next;
-      }
-      if (current < totalLen)
-        _pixels[current] = temp;
-    }
-
-    // clear visited flags
-    for (int i = 0; i < customMappingSize; i++) {
-      if (customMappingTable[i] != IS_GAP)
-        customMappingTable[i] &= INDEX_MASK;
-    }
-  }
-}
-
 void WS2812FX::show() {
   unsigned long showNow = millis();
   size_t diff = showNow - _lastShow;
@@ -1697,8 +1580,6 @@ void WS2812FX::show() {
   // avoid race condition, capture _callback value
   show_callback callback = _callback;
   if (callback) callback(); // will call setPixelColor or setRealtimePixelColor
-
-  BusManager::checkABLenabled(); // determine if ABL is used (ABL is processed in BusManager::show())
 
   // paint actual pixels
   int oldCCT = Bus::getCCT(); // store original CCT value (since it is global)
@@ -1789,7 +1670,7 @@ void WS2812FX::setBrightness(uint8_t b, bool direct) {
   if (_brightness == 0) { //unfreeze all segments on power off
     for (const Segment &seg : _segments) seg.freeze = false; // freeze is mutable
   }
-  BusManager::setBrightness(b);
+  BusManager::setBrightness(scaledBri(b));
   if (!direct) {
     unsigned long t = millis();
     if (_segments[0].next_time > t + 22 && t - _lastShow > MIN_SHOW_DELAY) trigger(); //apply brightness change immediately if no refresh soon

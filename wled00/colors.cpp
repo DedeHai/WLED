@@ -65,6 +65,7 @@ uint32_t color_add(uint32_t c1, uint32_t c2, bool preserveCR)
  * if using "video" method the resulting color will never become black unless it is already black
  */
 uint32_t color_fade(uint32_t c1, uint8_t amount, bool video) {
+  if(amount == 0) return 0; // no change
   return color_fade_inline(c1, amount, video);
 }
 

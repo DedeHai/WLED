@@ -132,6 +132,7 @@ class Bus {
     virtual uint16_t getLEDCurrent() const                      { return 0; }
     virtual uint16_t getUsedCurrent() const                     { return 0; }
     virtual uint16_t getMaxCurrent() const                      { return 0; }
+    virtual void     setCurrentLimit(uint16_t milliAmps)        {}
     virtual size_t   getBusSize() const                         { return sizeof(Bus); }
 
     inline  bool     hasRGB() const                             { return _hasRgb; }
@@ -154,7 +155,7 @@ class Bus {
     inline  bool     isOk() const                               { return _valid; }
     inline  bool     isReversed() const                         { return _reversed; }
     inline  bool     isOffRefreshRequired() const               { return _needsRefresh; }
-    inline  bool     containsPixel(uint16_t pix) const          { return pix >= _start && pix < _start + _len; }
+    inline  bool     containsPixel(uint32_t pix) const          { return pix >= _start && pix < _start + _len; }
 
     static inline std::vector<LEDType> getLEDTypes()            { return {{TYPE_NONE, "", PSTR("None")}}; } // not used. just for reference for derived classes
     static constexpr size_t   getNumberOfPins(uint8_t type)     { return isVirtual(type) ? 4 : isPWM(type) ? numPWMPins(type) : is2Pin(type) + 1; } // credit @PaoloTK
@@ -204,7 +205,6 @@ class Bus {
     uint8_t  _bri;
     uint16_t _start;
     uint16_t _len;
-    uint32_t _briSum;
     //struct { //using bitfield struct adds abour 250 bytes to binary size
       bool _reversed;//     : 1;
       bool _valid;//        : 1;
@@ -238,7 +238,6 @@ class BusDigital : public Bus {
 
     void show() override;
     bool canShow() const override;
-    void setBrightness(uint8_t b) override;
     void setStatusPixel(uint32_t c) override;
     [[gnu::hot]] void setPixelColor(unsigned pix, uint32_t c) override;
     void setColorOrder(uint8_t colorOrder) override;
@@ -250,6 +249,7 @@ class BusDigital : public Bus {
     uint16_t getLEDCurrent() const override  { return _milliAmpsPerLed; }
     uint16_t getUsedCurrent() const override { return _milliAmpsTotal; }
     uint16_t getMaxCurrent() const override  { return _milliAmpsMax; }
+    void     setCurrentLimit(uint16_t milliAmps) override { _milliAmpsLimit = milliAmps; }
     size_t   getBusSize() const override;
     void begin() override;
     void cleanup();
@@ -262,12 +262,26 @@ class BusDigital : public Bus {
     uint8_t  _pins[2];
     uint8_t  _iType;
     uint16_t _frequencykHz;
-    uint8_t  _milliAmpsPerLed;
     uint16_t _milliAmpsMax;
+    uint8_t  _milliAmpsPerLed;
+    uint16_t _milliAmpsLimit;
+    uint32_t _colorSum; // total color value for the bus, updated in setPixelColor(), used to estimate current
     void    *_busPtr;
 
-    uint32_t _colorSum; // total color value for the bus, updated in show(), used to estimate current
     static uint16_t _milliAmpsTotal; // is overwitten/recalculated on each show()
+
+    inline uint32_t restoreColorLossy(uint32_t c, uint8_t restoreBri) const {
+      if (restoreBri < 255) {
+        uint8_t* chan = (uint8_t*) &c;
+        for (uint_fast8_t i=0; i<4; i++) {
+          uint_fast16_t val = chan[i];
+          chan[i] = ((val << 8) + restoreBri) / (restoreBri + 1); //adding _bri slightly improves recovery / stops degradation on re-scale
+        }
+      }
+      return c;
+    }
+
+    void  estimateCurrentAndLimitBri();
 };
 
 
@@ -432,8 +446,7 @@ namespace BusManager {
   //inline uint16_t ablMilliampsMax()             { unsigned sum = 0; for (auto &bus : busses) sum += bus->getMaxCurrent(); return sum; }
   inline uint16_t ablMilliampsMax()             { return _gMilliAmpsMax; }  // used for compatibility reasons (and enabling virtual global ABL)
   inline void     setMilliampsMax(uint16_t max) { _gMilliAmpsMax = max;}
-  bool            usePerBusBriLimit(); // returns true if at least one bus has current limit set
-  inline void     checkABLenabled()             { _useABL = usePerBusBriLimit() || ablMilliampsMax() > 0; }
+  void            initializeABL();              // setup automatic brightness limiter parameters, call once after buses are initialized
 
   void useParallelOutput(); // workaround for inaccessible PolyBus
   bool hasParallelOutput(); // workaround for inaccessible PolyBus
