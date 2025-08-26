@@ -201,7 +201,7 @@ void BusDigital::estimateCurrent() {
   }
   // _colorSum has all the values of color channels summed, max would be getLength()*(3*255 + (255 if hasWhite()): convert to milliAmps
   uint32_t clrUnitsPerChannel = hasWhite() ? 4*255 : 3*255;
-  _milliAmpsTotal = (_colorSum * actualMilliampsPerLed) / clrUnitsPerChannel + getLength(); // add 1mA standby current per LED to total (WS2812: ~0.7mA, WS2815: ~2mA)
+  _milliAmpsTotal = ((uint64_t)_colorSum * actualMilliampsPerLed) / clrUnitsPerChannel + getLength(); // add 1mA standby current per LED to total (WS2812: ~0.7mA, WS2815: ~2mA)
 }
 
 void BusDigital::applyBriLimit(uint8_t newBri) {
