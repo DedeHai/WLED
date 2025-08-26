@@ -190,7 +190,7 @@ BusDigital::BusDigital(const BusConfig &bc, uint8_t nr)
 // scaled color channels are summed in BusDigital::setPixelColor()
 // the used current is estimated and limited in BusManager::show()
 // if limit is set too low, brightness is limited to 1 to at least show some light
-// to disable brightness limiter for a bus we either set output max current to 0 or single LED current to 0
+// to disable brightness limiter for a bus, set LED current to 0
 
 void BusDigital::estimateCurrent() {
   uint32_t actualMilliampsPerLed = _milliAmpsPerLed;
@@ -227,12 +227,11 @@ void BusDigital::applyBriLimit(uint8_t newBri) {
     unsigned hwLen = _len;
     if (_type == TYPE_WS2812_1CH_X3) hwLen = NUM_ICS_WS2812_1CH_3X(_len); // only needs a third of "RGB" LEDs for NeoPixelBus
     for (unsigned i = 0; i < hwLen; i++) {
-      // use 0 as color order, actual order does not matter here as we just update the channel values as-is TODO: if color order swaps white, we should restore color order. speed impact?
-      //uint8_t co = _colorOrderMap.getPixelColorOrder(i+_start, _colorOrder);
-      uint32_t c = PolyBus::getPixelColor(_busPtr, _iType, i, 0);
-      c = color_fade_inline(c, newBri, true); // apply additional dimming  TODO: how much slower is it if not using inline? and how much code does that save?
+      uint8_t co = _colorOrderMap.getPixelColorOrder(i+_start, _colorOrder); // need to revert color order for correct color scaling and CCT calc in case white is swapped
+      uint32_t c = PolyBus::getPixelColor(_busPtr, _iType, i, co);
+      c = color_fade(c, newBri, true); // apply additional dimming  note: using inline version is a bit faster but overhead of getPixelColor() dominates the speed impact by far
       if (hasCCT()) Bus::calculateCCT(c, cctWW, cctCW);
-      PolyBus::setPixelColor(_busPtr, _iType, i, c, 0, (cctCW<<8) | cctWW); // repaint all pixels with new brightness
+      PolyBus::setPixelColor(_busPtr, _iType, i, c, co, (cctCW<<8) | cctWW); // repaint all pixels with new brightness
     }
   }
 
@@ -263,7 +262,8 @@ void IRAM_ATTR BusDigital::setPixelColor(unsigned pix, uint32_t c) {
   if (hasWhite()) c = autoWhiteCalc(c);
   if (Bus::_cct >= 1900) c = colorBalanceFromKelvin(Bus::_cct, c); //color correction from CCT
 
-  c = color_fade_inline(c, _bri, true); // apply brightness
+  //c = color_fade_inline(c, _bri, true); // apply brightness
+  c = color_fade(c, _bri, true); // apply brightness
 
   if (BusManager::_useABL) {
     // if using ABL, sum all color channels to estimate current and limit brightness in show()

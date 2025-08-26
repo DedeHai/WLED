@@ -64,9 +64,26 @@ uint32_t color_add(uint32_t c1, uint32_t c2, bool preserveCR)
  * fades color toward black
  * if using "video" method the resulting color will never become black unless it is already black
  */
-uint32_t color_fade(uint32_t c1, uint8_t amount, bool video) {
-  if(amount == 0) return 0; // no change
-  return color_fade_inline(c1, amount, video);
+uint32_t IRAM_ATTR color_fade(uint32_t c1, uint8_t amount, bool video) {
+  if (c1 == 0 || amount == 0) return 0; // black or no change
+  if (amount == 255) return c1;
+  uint32_t addRemains = 0;
+
+  if (!video) amount++; // add one for correct scaling using bitshifts
+  else {
+    // video scaling: make sure colors do not dim to zero if they started non-zero unless they distort the hue
+    uint8_t r = byte(c1>>16), g = byte(c1>>8), b = byte(c1), w = byte(c1>>24); // extract r, g, b, w channels
+    uint8_t maxc = (r > g) ? ((r > b) ? r : b) : ((g > b) ? g : b); // determine dominant channel for hue preservation
+    uint8_t quarterMax = maxc >> 2; // note: using half of max results in color artefacts
+    addRemains  = r && r > quarterMax ? 0x00010000 : 0;
+    addRemains |= g && g > quarterMax ? 0x00000100 : 0;
+    addRemains |= b && b > quarterMax ? 0x00000001 : 0;
+    addRemains |= w ? 0x01000000 : 0;
+  }
+  const uint32_t TWO_CHANNEL_MASK = 0x00FF00FF;
+  uint32_t rb = (((c1 & TWO_CHANNEL_MASK) * amount) >> 8) &  TWO_CHANNEL_MASK; // scale red and blue
+  uint32_t wg = (((c1 >> 8) & TWO_CHANNEL_MASK) * amount) & ~TWO_CHANNEL_MASK; // scale white and green
+  return (rb | wg) + addRemains;
 }
 
 /*
