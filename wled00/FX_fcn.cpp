@@ -1945,13 +1945,7 @@ bool WS2812FX::deserializeMap(unsigned n) {
   if (n == 0 && (!root[F("width")].isNull() || !root[F("height")].isNull())) {
     Segment::maxWidth  = min(max(root[F("width")].as<int>(), 1), 255);
     Segment::maxHeight = min(max(root[F("height")].as<int>(), 1), 255);
-    if(Segment::maxWidth * Segment::maxHeight > _length) {
-      Segment::maxWidth = _length; // invalid size, fall back to 1D
-      Segment::maxHeight = 1;
-      isMatrix = false;
-    }
-    else
-      isMatrix = true;
+    isMatrix = true;
   }
 
   d_free(customMappingTable);
@@ -1975,7 +1969,7 @@ bool WS2812FX::deserializeMap(unsigned n) {
         } while (i < 32);
         if (!foundDigit) break;
         int index = atoi(number);
-        if (index < 0 || index > 0x7FFF || index > _length) index = 0xFFFF; // invalid index: 15 bits max and on physical strip
+        if (index < 0 || index > 16384) index = 0xFFFF;
         customMappingTable[customMappingSize++] = index;
         if (customMappingSize > getLengthTotal()) break;
       } else break; // there was nothing to read, stop

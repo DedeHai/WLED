@@ -185,40 +185,42 @@ BusDigital::BusDigital(const BusConfig &bc, uint8_t nr)
 //Stay safe with high amperage and have a reasonable safety margin!
 //I am NOT to be held liable for burned down garages or houses!
 
-// To disable brightness limiter we either set output max current to 0 or single LED current to 0
-
 // note on ABL implementation:
-// ABL is set up in finalizeInit(), if global limit is used, budget is distributed to the buses
+// ABL is set up in finalizeInit()
+// scaled color channels are summed in BusDigital::setPixelColor()
+// the used current is estimated and limited in BusManager::show()
 // if limit is set too low, brightness is limited to 1 to at least show some light
-// the brightness scaled color channels are summed in BusDigital::setPixelColor()
-// the used current is estimated and limited in BusDigital::show()
+// to disable brightness limiter for a bus we either set output max current to 0 or single LED current to 0
 
-void BusDigital::estimateCurrentAndLimitBri() {
-  unsigned powerBudget = _milliAmpsLimit;
-  if (powerBudget == 0) return; // ABL not used for this bus
-  uint8_t newBri = 255;
+void BusDigital::estimateCurrent() {
   uint32_t actualMilliampsPerLed = _milliAmpsPerLed;
-
-
   if (_milliAmpsPerLed == 255) {
     // use wacky WS2815 power model, see WLED issue #549
     _colorSum *= 3; // sum is sum of max value for each color, need to multiply by three to account for clrUnitsPerChannel being 3*255
     actualMilliampsPerLed = 12; // from testing an actual strip
   }
+  // _colorSum has all the values of color channels summed, max would be getLength()*(3*255 + (255 if hasWhite()): convert to milliAmps
+  uint32_t clrUnitsPerChannel = hasWhite() ? 4*255 : 3*255;
+  _milliAmpsTotal = (_colorSum * actualMilliampsPerLed) / clrUnitsPerChannel + getLength(); // add 1mA standby current per LED to total (WS2812: ~0.7mA, WS2815: ~2mA)
+}
 
-  unsigned colorsum = _colorSum;
-  if (powerBudget > getLength()) { // each LED uses about 1mA in standby
-    // _colorSum has all the values of channels summed (max would be getLength()*(3*255 + (255 if hasWhite()), convert to milliAmps
-    uint32_t clrUnitsPerChannel = hasWhite() ? 4*255 : 3*255;
-    _milliAmpsTotal = (_colorSum * actualMilliampsPerLed) / clrUnitsPerChannel + getLength(); // add standby current to total
-    if (_milliAmpsTotal > powerBudget) {
-      //scale brightness down to stay in current limit
-      newBri = powerBudget * 255 / _milliAmpsTotal + 1; // +1 to avoid 0 brightness
-      _milliAmpsTotal = _milliAmpsLimit;
+void BusDigital::applyBriLimit(uint8_t newBri) {
+  // a newBri of 0 means calculate per-bus brightness limit
+  if (newBri == 0) {
+    if (_milliAmpsLimit == 0 || _milliAmpsTotal == 0) return; // ABL not used for this bus
+    newBri = 255;
+
+    if (_milliAmpsLimit > getLength()) { // each LED uses about 1mA in standby
+      if (_milliAmpsTotal > _milliAmpsLimit) {
+        // scale brightness down to stay in current limit
+        newBri = ((uint32_t)_milliAmpsLimit * 255) / _milliAmpsTotal + 1; // +1 to avoid 0 brightness
+        _milliAmpsTotal = _milliAmpsLimit;
+      }
+    } else {
+      newBri = 1; // limit too low, set brightness to 1, this will dim down all colors to minimum since we use video scaling
+      _milliAmpsTotal = getLength(); // estimate bus current as minimum
     }
   }
-  else
-    newBri = 1; // limit too low, set brightness to 1, this will dim down all colors to minimum since we use video scaling
 
   if (newBri < 255) {
     uint8_t cctWW = 0, cctCW = 0;
@@ -238,9 +240,7 @@ void BusDigital::estimateCurrentAndLimitBri() {
 }
 
 void BusDigital::show() {
-  BusDigital::_milliAmpsTotal = 0;
   if (!_valid) return;
-  if (BusManager::_useABL) estimateCurrentAndLimitBri();  // will fill _milliAmpsTotal
   PolyBus::show(_busPtr, _iType, _skip); // faster if buffer consistency is not important (no skipped LEDs)
 }
 
@@ -923,15 +923,14 @@ void BusManager::off() {
   #ifdef ESP32_DATA_IDLE_HIGH
   esp32RMTInvertIdle();
   #endif
+  _gMilliAmpsUsed = 0; // reset, no LED idle current if relay is off
 }
 
 void BusManager::show() {
-  uint16_t milliAmpsSum = 0; // use temporary variable to always return a valid _gMilliAmpsUsed to UI
+  applyABL(); // apply brightness limit, updates _gMilliAmpsUsed
   for (auto &bus : busses) {
     bus->show();
-    milliAmpsSum += bus->getUsedCurrent();
   }
-  _gMilliAmpsUsed = milliAmpsSum;
 }
 
 void IRAM_ATTR BusManager::setPixelColor(unsigned pix, uint32_t c) {
@@ -965,55 +964,81 @@ bool BusManager::canAllShow() {
 
 void BusManager::initializeABL() {
   _useABL = false; // reset
-  unsigned numABLbuses = 0;
-
-  for (auto &bus : busses) {
-    if (bus->isDigital() && bus->getLEDCurrent() > 0 && bus->getMaxCurrent() > 0)
-      numABLbuses++; // count ABL enabled buses
-  }
-  if (numABLbuses > 0) {
-    _useABL = true; // at least one bus has ABL set
-    uint32_t ESPshare = MA_FOR_ESP / numABLbuses; // share of ESP current per ABL bus
+  if (_gMilliAmpsMax > 0) {
+    // check global brightness limit
     for (auto &bus : busses) {
-      if (bus->isDigital()) {
-        uint32_t busLength = bus->getLength();
-        uint32_t busDemand = busLength * bus->getLEDCurrent();
-        uint32_t busMax    = bus->getMaxCurrent();
-        if (busMax > ESPshare) busMax -= ESPshare;
-        if (busMax < busLength) busMax = busLength; // give each LED 1mA, ABL will dim down to minimum
-        if (busDemand == 0) busMax = 0; // no LED current set, disable ABL for this bus
-        bus->setCurrentLimit(busMax);
+      if (bus->isDigital() && bus->getLEDCurrent() > 0) {
+        _useABL = true; // at least one bus has valid LED current
+        return;
       }
     }
-  }
-  else if (_gMilliAmpsMax > 0) {
-    _useABL = true; // global limit set
-    // distribute power budget among digital buses
-    unsigned totalMaxCurrent = 0;
+  } else {
+    // check per bus brightness limit
+    unsigned numABLbuses = 0;
     for (auto &bus : busses) {
-      if (bus->isDigital()) {
-        totalMaxCurrent += ((uint32_t)bus->getLength() * bus->getLEDCurrent()); // sum total leds per bus and multiply with LED current
-      }
+      if (bus->isDigital() && bus->getLEDCurrent() > 0 && bus->getMaxCurrent() > 0)
+        numABLbuses++; // count ABL enabled buses
     }
-    // distribute proportionally
-    if (totalMaxCurrent > 0) {
-      uint32_t globalMax = _gMilliAmpsMax > MA_FOR_ESP ? _gMilliAmpsMax - MA_FOR_ESP : _gMilliAmpsMax; // subtract ESP current consumption, don't bother if too low
-
+    if (numABLbuses > 0) {
+      _useABL = true; // at least one bus has ABL set
+      uint32_t ESPshare = MA_FOR_ESP / numABLbuses; // share of ESP current per ABL bus
       for (auto &bus : busses) {
         if (bus->isDigital()) {
-          uint32_t busLength = bus->getLength();
-          uint32_t busDemand = busLength * bus->getLEDCurrent(); //8960
-          uint32_t busShare  = (uint64_t)busDemand * globalMax / totalMaxCurrent;
-          if (busShare < busLength) busShare = busLength; // give each LED 1mA, ABL will dim down to minimum
-          if (busDemand == 0) busShare = 0; // no LED current set, disable ABL for this bus
-          bus->setCurrentLimit(busShare);
-          Serial.printf("Bus: %d mA\n", busShare);//!!! remove after debug
+          BusDigital &busd = static_cast<BusDigital&>(*bus);
+          uint32_t busLength = busd.getLength();
+          uint32_t busDemand = busLength * busd.getLEDCurrent();
+          uint32_t busMax    = busd.getMaxCurrent();
+          if (busMax > ESPshare) busMax -= ESPshare;
+          if (busMax < busLength) busMax = busLength; // give each LED 1mA, ABL will dim down to minimum
+          if (busDemand == 0) busMax = 0; // no LED current set, disable ABL for this bus
+          busd.setCurrentLimit(busMax);
         }
       }
     }
-    else
-      _useABL = false; // no LED current set
   }
+}
+
+void BusManager::applyABL() {
+  if (_useABL) {
+    unsigned milliAmpsSum = 0; // use temporary variable to always return a valid _gMilliAmpsUsed to UI
+    unsigned totalLEDs = 0;
+    for (auto &bus : busses) {
+      if (bus->isDigital() && bus->isOk()) {
+        BusDigital &busd = static_cast<BusDigital&>(*bus);
+        busd.estimateCurrent(); // sets _milliAmpsTotal, current is estimated for all buses even if they have the limit set to 0
+        if (_gMilliAmpsMax == 0)
+          busd.applyBriLimit(0); // apply per bus ABL limit, updates _milliAmpsTotal if limit reached
+        milliAmpsSum += busd.getUsedCurrent();
+        totalLEDs += busd.getLength(); // sum total number of LEDs for global Limit
+      }
+    }
+    // check global current limit and apply global ABL limit, total current is summed above
+    if (_gMilliAmpsMax > 0) {
+      uint8_t  newBri = 255;
+      uint32_t globalMax = _gMilliAmpsMax > MA_FOR_ESP ? _gMilliAmpsMax - MA_FOR_ESP : 1; // subtract ESP current consumption, fully limit if too low
+      if (globalMax > totalLEDs) { // check if budget is larger than standby current
+        if (milliAmpsSum > globalMax) {
+          newBri = globalMax * 255 / milliAmpsSum + 1; // scale brightness down to stay in current limit, +1 to avoid 0 brightness
+          milliAmpsSum = globalMax; // update total used current
+        }
+      } else {
+        newBri = 1; // limit too low, set brightness to minimum
+        milliAmpsSum = totalLEDs; // estimate total used current as minimum
+      }
+
+      // apply brightness limit to each bus, if its 255 it will only reset _colorSum
+      for (auto &bus : busses) {
+        if (bus->isDigital() && bus->isOk()) {
+          BusDigital &busd = static_cast<BusDigital&>(*bus);
+          if (busd.getLEDCurrent() > 0)  // skip buses with LED current set to 0
+            busd.applyBriLimit(newBri);
+        }
+      }
+    }
+    _gMilliAmpsUsed = milliAmpsSum;
+  }
+  else
+    _gMilliAmpsUsed = 0; // reset, we have no current estimation without ABL
 }
 
 ColorOrderMap& BusManager::getColorOrderMap() { return _colorOrderMap; }

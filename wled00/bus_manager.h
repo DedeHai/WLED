@@ -132,7 +132,6 @@ class Bus {
     virtual uint16_t getLEDCurrent() const                      { return 0; }
     virtual uint16_t getUsedCurrent() const                     { return 0; }
     virtual uint16_t getMaxCurrent() const                      { return 0; }
-    virtual void     setCurrentLimit(uint16_t milliAmps)        {}
     virtual size_t   getBusSize() const                         { return sizeof(Bus); }
 
     inline  bool     hasRGB() const                             { return _hasRgb; }
@@ -249,7 +248,9 @@ class BusDigital : public Bus {
     uint16_t getLEDCurrent() const override  { return _milliAmpsPerLed; }
     uint16_t getUsedCurrent() const override { return _milliAmpsTotal; }
     uint16_t getMaxCurrent() const override  { return _milliAmpsMax; }
-    void     setCurrentLimit(uint16_t milliAmps) override { _milliAmpsLimit = milliAmps; }
+    void     setCurrentLimit(uint16_t milliAmps) { _milliAmpsLimit = milliAmps; }
+    void     estimateCurrent(); // estimate used current from summed colors
+    void     applyBriLimit(uint8_t newBri);
     size_t   getBusSize() const override;
     void begin() override;
     void cleanup();
@@ -280,8 +281,6 @@ class BusDigital : public Bus {
       }
       return c;
     }
-
-    void  estimateCurrentAndLimitBri();
 };
 
 
@@ -447,6 +446,7 @@ namespace BusManager {
   inline uint16_t ablMilliampsMax()             { return _gMilliAmpsMax; }  // used for compatibility reasons (and enabling virtual global ABL)
   inline void     setMilliampsMax(uint16_t max) { _gMilliAmpsMax = max;}
   void            initializeABL();              // setup automatic brightness limiter parameters, call once after buses are initialized
+  void            applyABL();                   // apply automatic brightness limiter, global or per bus
 
   void useParallelOutput(); // workaround for inaccessible PolyBus
   bool hasParallelOutput(); // workaround for inaccessible PolyBus
