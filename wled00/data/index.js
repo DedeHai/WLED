@@ -446,15 +446,19 @@ function addToErrorLog(errorCode, timestamp = null) {
 function updateInfoButtonIcon() {
 	const infoBtn = gId('buttonI');
 	const icon = infoBtn.querySelector('i');
+	const label = infoBtn.querySelector('.tab-label');
 	if (hasUnreadErrors) {
-		// Change to red exclamation mark icon
-		icon.innerHTML = '&#xe18a;'; // Use add/warning icon
-		icon.style.color = 'var(--c-r)';
+		icon.innerHTML = '&#x2757;';      // Red exclamation mark ❗
+		//icon.style.color = 'var(--c-r)';
+		label.style.color = 'var(--c-r)'; // make "Info" text red
+		icon.classList.add('blink');      // blink the icon
 	} else {
-		// Reset to normal info icon
-		icon.innerHTML = '&#xe066;'; // Info icon
-		icon.style.color = '';
+		icon.innerHTML = '&#xe066;';    	// Reset to normal info icon
+		//icon.style.color = '';
+		label.style.color = '';
+		icon.classList.remove('blink'); // stop blinking
 	}
+
 }
 
 function handleServerErrorLog(serverErrors, serverTime) {
@@ -488,27 +492,22 @@ function handleServerErrorLog(serverErrors, serverTime) {
 }
 
 function clearErrorLog() {
-	// Send clear command to server
+	// Send clear command
 	fetch(getURL('/json/state'), {
 		method: 'post',
 		body: JSON.stringify({clrErrLog: true}),
-		headers: {
-			'Content-Type': 'application/json'
-		}
+		headers: { 'Content-Type': 'application/json' }
 	})
 	.then(res => {
-		// Clear local state
-		errorLog = [];
+		errorLog = []; // Clear local state
 		hasUnreadErrors = false;
 		updateInfoButtonIcon();
-		const errorArea = gId('errorLogArea');
+		const errorArea = gId('errLogArea');
 		if (errorArea) {
 			errorArea.style.display = 'none';
 		}
+		requestJson(); // request update
 	})
-	.catch((error) => {
-		console.log('Error clearing log:', error);
-	});
 }
 
 function generateErrorLogHtml() {
@@ -873,8 +872,21 @@ function populateInfo(i)
 	}
 	var vcn = "Kuuhaku";
 	if (i.cn) vcn = i.cn;
+	// Generate error log if there are errors
+	var errLogArea = "";
+	if (errorLog.length > 0) {
+		errLogArea = `<tr><td colspan=2 style="text-align: center; font-size: 16px; margin: 0 0 8px 0;">Error Log</td></tr>
+		<tr><td colspan=2>
+					<div style="padding: 8px; background: var(--c-3); border-radius: 20px; font-size: 14px; max-height: 120px; overflow-y: auto; text-align: left;">${generateErrorLogHtml()}</div>
+					<div style="margin-top: 8px; text-align: center;">
+						<button class="btn ibtn" onclick="clearErrorLog()">Clear Error Log</button>
+					</div>
+				</td></tr>
+		<tr><td colspan=2><hr style="height:1px;border-width:0;color:gray;background-color:gray"></td></tr>`;
+	}
 
 	cn += `v${i.ver} "${vcn}"<br><br><table>
+${errLogArea}
 ${urows}
 ${urows===""?'':'<tr><td colspan=2><hr style="height:1px;border-width:0;color:gray;background-color:gray"></td></tr>'}
 ${i.opt&0x100?inforow("Debug","<button class=\"btn btn-xs\" onclick=\"requestJson({'debug':"+(i.opt&0x0080?"false":"true")+"});\"><i class=\"icons "+(i.opt&0x0080?"on":"off")+"\">&#xe08f;</i></button>"):''}
@@ -896,7 +908,7 @@ ${inforow("Environment",i.arch + " " + i.core + " (" + i.lwip + ")")}
 	gId('kv').innerHTML = cn;
 	
 	// Update error log area visibility and content
-	const errorArea = gId('errorLogArea');
+	const errorArea = gId('errLogArea');
 	if (errorLog.length > 0) {
 		errorArea.style.display = 'block';
 		gId('errorLogContent').innerHTML = generateErrorLogHtml();

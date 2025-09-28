@@ -417,6 +417,19 @@ uint8_t perlin8(uint16_t x);
 uint8_t perlin8(uint16_t x, uint16_t y);
 uint8_t perlin8(uint16_t x, uint16_t y, uint16_t z);
 
+// Error logging
+struct ErrorLogEntry {
+  unsigned long timestamp; // millis() when error occurred (converted to local time in UI)
+  byte errorCode;          // error number (8bit)
+  byte tag1;               // additional info, e.g. bus id
+  byte tag2;               // additional info, e.g. segment id
+  byte tag3;               // additional info, e.g. preset id
+};
+void addToErrorLog(byte errorCode, byte tag1 = 0, byte tag2 = 0, byte tag3 = 0);
+void clearErrorLog();
+byte getErrorLogCount();
+const struct ErrorLogEntry& getErrorLogEntry(byte index);
+
 // fast (true) random numbers using hardware RNG, all functions return values in the range lowerlimit to upperlimit-1
 // note: for true random numbers with high entropy, do not call faster than every 200ns (5MHz)
 // tests show it is still highly random reading it quickly in a loop (better than fastled PRNG)
@@ -554,11 +567,5 @@ void sendDataWs(AsyncWebSocketClient * client = nullptr);
 //xml.cpp
 void XML_response(Print& dest);
 void getSettingsJS(byte subPage, Print& dest);
-
-//util.cpp - error logging
-void addToErrorLog(byte errorCode, byte tag1 = 0, byte tag2 = 0, byte tag3 = 0);
-void clearErrorLog();
-byte getErrorLogCount();
-const struct ErrorLogEntry& getErrorLogEntry(byte index);
 
 #endif
