@@ -56,6 +56,10 @@ var cpick = new iro.ColorPicker("#picker", {
 	}]
 });
 
+// global error handler for any uncaught errors to prevent UI not loading (just in case)
+window.onerror = (m,u,l) => (console.log('Error:',m,'line',l), true);
+window.onunhandledrejection = e => (console.log('Promise:',e.reason), e.preventDefault());
+
 function handleVisibilityChange() {if (!d.hidden && new Date () - lastUpdate > 3000) requestJson();}
 function sCol(na, col) {d.documentElement.style.setProperty(na, col);}
 function gId(c) {return d.getElementById(c);}
@@ -1067,6 +1071,12 @@ function populateSegments(s)
 				`</div>`+
 				(cfg.comp.segpwr ? '' : segp) +
 			`</div>`;
+	}
+
+	if (segCount == 0) {
+		// no segments defined, can happen if heap is low.
+		// TODO: add error message?
+		return;
 	}
 
 	gId('segcont').innerHTML = cn;
