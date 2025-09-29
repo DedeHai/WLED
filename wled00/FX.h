@@ -487,6 +487,8 @@ class Segment {
         bool    _manualW  : 1;
       };
     };
+    uint8_t _dataWatchdog; // incremented in service(), reset in allocateData() or PS updateSystem()
+    uint8_t _reserved; // padding byte, feel free to use this at no RAM cost
 
     // static variables are use to speed up effect calculations by stashing common pre-calculated values
     static unsigned      _usedSegmentData;    // amount of data used by all segments
@@ -556,6 +558,11 @@ class Segment {
       updateTransitionProgress();
       if (isInTransition() && progress() == 0xFFFFU) stopTransition();
     }
+    inline void handleSegDataWatchdog() {
+      if (_dataWatchdog < 2) _dataWatchdog++;  // increment watchdog, is reset in allocateData() or PS updateSystem()
+      else if(_dataLen)      deallocateData(); // segment data not used by FX, release segment data
+    }
+    inline void kickSegDataWatchdog() { _dataWatchdog = 0; } // reset watchdog, called each frame if FX uses segment data
     inline uint16_t progress() const          { return isInTransition() ? _t->_progress : 0xFFFFU; } // relies on handleTransition()/updateTransitionProgress() to update progression variable
     inline Segment *getOldSegment() const     { return isInTransition() ? _t->_oldSegment : nullptr; }
 

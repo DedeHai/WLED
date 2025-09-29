@@ -479,16 +479,23 @@ static_assert(WLED_MAX_BUSSES <= 32, "WLED_MAX_BUSSES exceeds hard limit");
   #endif
 #endif
 
+// maximum memory used to decide if a bus should be created, also used in UI to inform the user about memory use
+// note: this is not a hard limit, if exceeded things still work (thanks to x_malloc() functions) but performance may degrade
+// note2: if bus + buffers (1x global, 1x segment) exceeds DOUBLE this limit, bus creation is denied in UI.
 #ifndef MAX_LED_MEMORY
   #ifdef ESP8266
-    #define MAX_LED_MEMORY 4096
+    #define MAX_LED_MEMORY (4*1024) // note: on ESP8266, UI breaks down if using over 10k for bus + buffers
   #else
     #if defined(ARDUINO_ARCH_ESP32S2)
-      #define MAX_LED_MEMORY 16384
+      #define MAX_LED_MEMORY (16*1024)
     #elif defined(ARDUINO_ARCH_ESP32C3)
-      #define MAX_LED_MEMORY 32768
+      #define MAX_LED_MEMORY (32*1024)
     #else
-      #define MAX_LED_MEMORY 65536
+      #ifdef BOARD_HAS_PSRAM
+        #define MAX_LED_MEMORY (64*1024) // with PSRAM only bus buffers have to remain in DRAM
+      #else
+        #define MAX_LED_MEMORY (42*1024) // limit ESP32 without PSRAM to ~5000 LEDs
+      #endif
     #endif
   #endif
 #endif
@@ -560,12 +567,15 @@ static_assert(WLED_MAX_BUSSES <= 32, "WLED_MAX_BUSSES exceeds hard limit");
   #endif
 #endif
 
-// minimum heap size required to process web requests: try to keep free heap above this value
+// minimum heap size required to process web requests:
+// buffer allocations try to keep free heap above this value (must be contiguous on ESP32 family)
+// if total heap runs below this value, segments are reset (heap check in main loop, see wled.cpp)
 #ifdef ESP8266
-  #define MIN_HEAP_SIZE (9*1024)
+  #define MIN_HEAP_SIZE 8704 // 8.5k keeps the UI happy
 #else
-  #define MIN_HEAP_SIZE (15*1024) // WLED allocation functions (util.cpp) try to keep this much contiguous heap free for other tasks
+  #define MIN_HEAP_SIZE (16*1024) // WLED allocation functions (util.cpp) try to keep this much contiguous heap free for other tasks
 #endif
+
 // threshold for PSRAM use: if heap is running low, requests to allocate_buffer(prefer DRAM) above PSRAM_THRESHOLD may be put in PSRAM
 // if heap is depleted, PSRAM will be used regardless of threshold
 #if defined(CONFIG_IDF_TARGET_ESP32S3)

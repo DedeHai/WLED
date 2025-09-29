@@ -146,10 +146,14 @@ Segment& Segment::operator= (Segment &&orig) noexcept {
 
 // allocates effect data buffer on heap and initialises (erases) it
 bool Segment::allocateData(size_t len) {
+
+  _dataWatchdog = 0; // reset watchdog, FX is using data
+  //Serial.printf_P(PSTR("Currently allocated segment data: %d\n"), _dataLen);
   if (len == 0) return false;    // nothing to do
   if (data && _dataLen >= len) { // already allocated enough (reduce fragmentation)
     if (call == 0) {
-      if (_dataLen < FAIR_DATA_PER_SEG) { // segment data is small
+      // if new request is more than half of current buffer, clear it, otherwise reallocate below to not hog RAM (reduce fragmentation)
+      if (len > (_dataLen >> 1)) {
         //DEBUG_PRINTF_P(PSTR("--   Clearing data (%d): %p\n"), len, this);
         memset(data, 0, len);  // erase buffer if called during effect initialisation
         return true; // no need to reallocate
@@ -159,6 +163,19 @@ bool Segment::allocateData(size_t len) {
       return true;
   }
   //DEBUG_PRINTF_P(PSTR("--   Allocating data (%d): %p\n"), len, this);
+
+  //check if there is enough heap to even try to increase the buffer, otherwise keep what we have (PS may request less on next call)
+  #ifdef ESP8266
+  if (len > _dataLen && MIN_HEAP_SIZE + (len - _dataLen) > getFreeHeapSize())
+  #else
+  if (len > _dataLen && MIN_HEAP_SIZE + (len - _dataLen) > getContiguousFreeHeap())
+  #endif
+  {
+    DEBUG_PRINTF_P(PSTR("Not enough free heap to increase data buffer to %d\n"), len);
+    errorFlag = ERR_NORAM;
+    return false;
+  }
+
   // limit to MAX_SEGMENT_DATA if there is no PSRAM, otherwise prefer functionality over speed
   #ifndef BOARD_HAS_PSRAM
   if (Segment::getUsedSegmentData() + len - _dataLen > MAX_SEGMENT_DATA) {
@@ -172,6 +189,7 @@ bool Segment::allocateData(size_t len) {
   if (data) {
     d_free(data); // free data and try to allocate again (segment buffer may be blocking contiguous heap)
     Segment::addUsedSegmentData(-_dataLen); // subtract buffer size
+    _dataLen = 0;   // reset data length
   }
 
   data = static_cast<byte*>(allocate_buffer(len, BFRALLOC_PREFER_DRAM | BFRALLOC_CLEAR)); // prefer DRAM over PSRAM for speed
@@ -1268,6 +1286,8 @@ void WS2812FX::service() {
     seg.handleTransition();
     // reset the segment runtime data if needed
     seg.resetIfRequired();
+    // check watchdog and release segment data if unused (free up ram, reduce fragmentation)
+    seg.handleSegDataWatchdog();
 
     if (!seg.isActive()) continue;
 

@@ -648,7 +648,7 @@ int32_t hw_random(int32_t lowerlimit, int32_t upperlimit) {
 #ifdef ESP8266
 static void *validateFreeHeap(void *buffer) {
   // make sure there is enough free heap left if buffer was allocated in DRAM region, free it if not
-  if (getContiguousFreeHeap() < MIN_HEAP_SIZE) {
+  if (getFreeHeapSize() < MIN_HEAP_SIZE) {
     free(buffer);
     return nullptr;
   }
@@ -657,24 +657,28 @@ static void *validateFreeHeap(void *buffer) {
 
 void *d_malloc(size_t size) {
   // note: using "if (getContiguousFreeHeap() > MIN_HEAP_SIZE + size)" did perform worse in tests with regards to keeping heap healthy and UI working
-  void *buffer = malloc(size);
-  return validateFreeHeap(buffer);
+  if (size + MIN_HEAP_SIZE < getFreeHeapSize()) {
+    void *buffer = malloc(size);
+    return validateFreeHeap(buffer);
+  } else
+    return nullptr;
 }
 
 void *d_calloc(size_t count, size_t size) {
-  void *buffer = calloc(count, size);
-  return validateFreeHeap(buffer);
+  if ((size * count) + MIN_HEAP_SIZE < getFreeHeapSize()) {
+    void *buffer = calloc(count, size);
+    return validateFreeHeap(buffer);
+  } else
+    return nullptr;
 }
 
-// realloc with malloc fallback, note: on ESPS8266 there is no safe way to ensure MIN_HEAP_SIZE during realloc()s, free buffer and allocate new one
+// realloc with malloc fallback, note: on ESPS8266 there is no safe way to ensure MIN_HEAP_SIZE during realloc()s, may temporarily exceed it
 void *d_realloc_malloc(void *ptr, size_t size) {
-  //void *buffer = realloc(ptr, size);
-  //buffer = validateFreeHeap(buffer);
-  //if (buffer) return buffer; // realloc successful
-  //d_free(ptr); // free old buffer if realloc failed (or min heap was exceeded)
-  //return d_malloc(size); // fallback to malloc
-  free(ptr);
-  return d_malloc(size);
+  void *buffer = realloc(ptr, size);
+  buffer = validateFreeHeap(buffer);
+  if (buffer) return buffer; // realloc successful
+    d_free(ptr); // free old buffer if realloc failed or min heap was exceeded
+  return d_malloc(size); // fallback to malloc
 }
 #else
 static void *validateFreeHeap(void *buffer) {

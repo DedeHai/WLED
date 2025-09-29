@@ -970,6 +970,7 @@ void WLED_O2_ATTR ParticleSystem2D::collideParticles(PSparticle &particle1, PSpa
 void ParticleSystem2D::updateSystem(void) {
   //PSPRINTLN("updateSystem2D");
   setMatrixSize(SEGMENT.vWidth(), SEGMENT.vHeight());
+  SEGMENT.kickSegDataWatchdog(); // we are using segment data, reset watchdog
   updatePSpointers(advPartProps != nullptr, advPartSize != nullptr); // update pointers to PS data, also updates availableParticles
   //PSPRINTLN("\n END update System2D, running FX...");
 }
@@ -1109,7 +1110,7 @@ bool initParticleSystem2D(ParticleSystem2D *&PartSys, uint32_t requestedsources,
   PSPRINTLN(" request numparticles:" + String(numparticles));
   uint32_t numsources = calculateNumberOfSources2D(pixels, requestedsources);
   bool allocsuccess = false;
-  while(numparticles >= 4) { // make sure we have at least 4 particles or quit
+  while(numparticles > 4) { // make sure we have at least 5 particles or quit
     if (allocateParticleSystemMemory2D(numparticles, numsources, advanced, sizecontrol, additionalbytes)) {
       PSPRINTLN(F("PS 2D alloc succeeded"));
       allocsuccess = true;
@@ -1719,6 +1720,7 @@ void WLED_O2_ATTR ParticleSystem1D::collideParticles(PSparticle1D &particle1, co
 // note: do not access the PS class in FX befor running this function (or it messes up SEGENV.data)
 void ParticleSystem1D::updateSystem(void) {
   setSize(SEGMENT.vLength()); // update size
+  SEGMENT.kickSegDataWatchdog(); // we are using segment data, reset watchdog
   updatePSpointers(advPartProps != nullptr);
 }
 
@@ -1806,7 +1808,7 @@ bool initParticleSystem1D(ParticleSystem1D *&PartSys, const uint32_t requestedso
   uint32_t numparticles = calculateNumberOfParticles1D(fractionofparticles, advanced);
   uint32_t numsources = calculateNumberOfSources1D(requestedsources);
   bool allocsuccess = false;
-  while(numparticles >= 10) { // make sure we have at least 10 particles or quit
+  while(numparticles > 4) { // make sure we have at least 5 particles or quit
     if (allocateParticleSystemMemory1D(numparticles, numsources, advanced, additionalbytes)) {
       PSPRINT(F("PS 1D alloc succeeded"));
       allocsuccess = true;
