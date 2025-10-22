@@ -8,6 +8,7 @@
 .pioenvs
 .piolibdeps
 .vscode
+.vscode/extensions.json
 
 esp01-update.sh
 platformio_override.ini
