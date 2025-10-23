@@ -78,7 +78,7 @@ function populateCEEditor(name, segID)
             <button class="btn infobtn" onclick="loadCETemplate('${name}')">Load template</button><br>
             <button class="btn infobtn" onclick="downloadGHFile('CE','wledv033.json',true,true)">Download wled json</button>
             <button class="btn infobtn" onclick="downloadGHFile('CE','presets.json',true,true)">Download presets.json</button><br>
-            <button class="btn infobtn" onclick="location.href='https://github.com/MoonModules/WLED-Effects/tree/master/ARTIFX/wled'" type="button">ARTI-FX Library</button>
+            <button class="btn infobtn" onclick="location.href='https://github.com/MoonModules/MM-Effects/tree/master/ARTIFX/wled'" type="button">ARTI-FX Library</button>
             <button class="btn infobtn btn-xs" onclick="location.href='https://mm.kno.wled.ge/moonmodules/arti-fx'" type="button">?</button><br>
             <br><i>Compile and Run Log</i><br>
             <textarea class="ceTextarea" id="ceLogArea"></textarea><br>
@@ -100,10 +100,10 @@ function populateCEEditor(name, segID)
 }
 
 function downloadGHFile(url, name, save=false, warn=false) { //Githubfile
-    if (url == "CE") url = "https://raw.githubusercontent.com/MoonModules/WLED-Effects/master/ARTIFX/wled/";
-    if (url == "HBB") url = "https://raw.githubusercontent.com/MoonModules/WLED-Effects/master/Presets/HB_PresetPack210808_32x32_16seg/Base%20pack/";
-    if (url == "HBE") url = "https://raw.githubusercontent.com/MoonModules/WLED-Effects/master/Presets/HB_PresetPack210808_32x32_16seg/Effects%20pack/";
-    if (url == "LM") url = "https://raw.githubusercontent.com/MoonModules/WLED-Effects/master/Ledmaps/";
+    if (url == "CE") url = "https://raw.githubusercontent.com/MoonModules/MM-Effects/master/ARTIFX/wled/";
+    if (url == "HBB") url = "https://raw.githubusercontent.com/MoonModules/MM-Effects/master/Presets/HB_PresetPack210808_32x32_16seg/Base%20pack/";
+    if (url == "HBE") url = "https://raw.githubusercontent.com/MoonModules/MM-Effects/master/Presets/HB_PresetPack210808_32x32_16seg/Effects%20pack/";
+    if (url == "LM") url = "https://raw.githubusercontent.com/MoonModules/MM-Effects/master/Ledmaps/";
 
     fetchAndExecute(url, name, null, function(parms,text) {
         if (save) {
