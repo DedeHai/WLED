@@ -441,7 +441,7 @@ static const uint8_t *getPresetCache(size_t &size) {
     File file = WLED_FS.open("/presets.json", "r");
 
   #if ESP_IDF_VERSION_MAJOR >= 4
-    if (file) f.setBufferSize(FS_BUFSIZE*2);        // reduced internal buffer leads to shorter blocking delay, and might prevent LED glitches
+    if (file) file.setBufferSize(FS_BUFSIZE*2);        // reduced internal buffer leads to shorter blocking delay, and might prevent LED glitches
   #endif
     if (file) {
       presetsCachedTime = presetsModifiedTime;
