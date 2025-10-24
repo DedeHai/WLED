@@ -11773,18 +11773,35 @@ static const char _data_RESERVED[] PROGMEM = "RSVD";
 // use id==255 to find unallocated gaps (with "Reserved" data string)
 // if vector size() is smaller than id (single) data is appended at the end (regardless of id)
 void WS2812FX::addEffect(uint8_t id, mode_ptr mode_fn, const char *mode_name) {
+  if ((id < _mode.size()) && (_modeData[id] != _data_RESERVED)) {
+      DEBUG_PRINTF("addEffect(%d) -> ", id);
+      DEBUG_PRINTF(" already in use, finding a new slot for -> %s\n", mode_name);
+      id = 255;
+  }
+  if ((id >= _mode.size()) && (id != 255)) {
+      DEBUG_PRINTF("!addEffect(%d) -> slot not existing, finding new slot\n", id);
+  }
   if (id == 255) { // find empty slot
     for (size_t i=1; i<_mode.size(); i++) if (_modeData[i] == _data_RESERVED) { id = i; break; }
   }
+
   if (id < _mode.size()) {
-    if (_modeData[id] != _data_RESERVED) return; // do not overwrite alerady added effect
+    if (_modeData[id] != _data_RESERVED) {
+      USER_PRINTF("!addEffect(%d)  failed - existing effect cannot be replaced. <=> %s\n", id, mode_name);
+      return; // do not overwrite alerady added effect
+  }
     _mode[id]     = mode_fn;
     _modeData[id] = mode_name;
   } else {
+    if (_modeCount > 253) {
+      USER_PRINTF("!addEffect(%d)  failed - mode list is full!    %s\n", id, mode_name);
+      return; // mode list is full - cannot add
+    }
     _mode.push_back(mode_fn);
     _modeData.push_back(mode_name);
     if (_modeCount < _mode.size()) _modeCount++;
   }
+  DEBUG_PRINTF("addEffect(%d) => %s\n", id, mode_name);
 }
 
 void WS2812FX::setupEffectData() {
