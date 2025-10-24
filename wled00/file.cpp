@@ -18,7 +18,7 @@
  * 1. File must be a string representation of a valid JSON object
  * 2. File must have '{' as first character
  * 3. There must not be any additional characters between a root-level key and its value object (e.g. space, tab, newline)
- * 4. There must not be any characters between an root object-separating ',' and the next object key string
+ * 4. There must not be any characters between a root object-separating ',' and the next object key string
  * 5. There may be any number of spaces, tabs, and/or newlines before such object-separating ','
  * 6. There must not be more than 5 consecutive spaces at any point except for those permitted in condition 5
  * 7. If it is desired to delete the first usable object (e.g. preset file), a dummy object '"0":{}' is inserted at the beginning.
@@ -66,9 +66,6 @@ static bool bufferedFind(const char *target, bool fromStart = true) {
 
   size_t index = 0;
   byte buf[FS_BUFSIZE];
-  #if ESP_IDF_VERSION_MAJOR >= 4
-  f.setBufferSize(FS_BUFSIZE);
-  #endif
   if (fromStart) f.seek(0);
 
   while (f.position() < f.size() -1) {
@@ -110,9 +107,6 @@ static bool bufferedFindSpace(size_t targetLen, bool fromStart = true) {
 
   size_t index = 0; // better to use size_t instead if uint16_t
   byte buf[FS_BUFSIZE];
-  #if ESP_IDF_VERSION_MAJOR >= 4
-  f.setBufferSize(FS_BUFSIZE);
-  #endif
   if (fromStart) f.seek(0);
 
   while (f.position() < f.size() -1) {
@@ -156,9 +150,6 @@ static bool bufferedFindObjectEnd() {
   uint16_t objDepth = 0; //num of '{' minus num of '}'. return once 0
   //size_t start = f.position();
   byte buf[FS_BUFSIZE];
-  #if ESP_IDF_VERSION_MAJOR >= 4
-  f.setBufferSize(FS_BUFSIZE);
-  #endif
   while (f.position() < f.size() -1) {
     size_t bufsize = f.read(buf, FS_BUFSIZE); // better to use size_t instead of uint16_t
     size_t count = 0;
@@ -183,9 +174,6 @@ static void writeSpace(size_t l)
 {
   byte buf[FS_BUFSIZE];
   memset(buf, ' ', FS_BUFSIZE);
-  #if ESP_IDF_VERSION_MAJOR >= 4
-  f.setBufferSize(FS_BUFSIZE);
-  #endif
   while (l > 0) {
     size_t block = (l>FS_BUFSIZE) ? FS_BUFSIZE : l;
     f.write(buf, block);
@@ -299,6 +287,9 @@ bool writeObjectToFile(const char* file, const char* key, JsonDocument* content)
     DEBUGFS_PRINTLN(F("Failed to open!"));
     return false;
   }
+  #if ESP_IDF_VERSION_MAJOR >= 4
+  f.setBufferSize(FS_BUFSIZE);        // reduced internal buffer leads to shorter blocking delay, and might prevent LED glitches
+  #endif
 
   if (!bufferedFind(key)) //key does not exist in file
   {
@@ -365,6 +356,10 @@ bool readObjectFromFile(const char* file, const char* key, JsonDocument* dest)
   f = WLED_FS.open(file, "r");
   if (!f) return false;
   else { DEBUG_PRINTF(PSTR("FILE '%s' open to read, size %d bytes\n"), file, (int)f.size());} // WLEDMM additional debug message
+
+  #if ESP_IDF_VERSION_MAJOR >= 4
+  f.setBufferSize(FS_BUFSIZE*2);        // reduced internal buffer leads to shorter blocking delay, and might prevent LED glitches
+  #endif
 
   if (key != nullptr && !bufferedFind(key)) //key does not exist in file
   {
@@ -444,6 +439,10 @@ static const uint8_t *getPresetCache(size_t &size) {
 
   if (!presetsCached) {
     File file = WLED_FS.open("/presets.json", "r");
+
+  #if ESP_IDF_VERSION_MAJOR >= 4
+    if (file) f.setBufferSize(FS_BUFSIZE*2);        // reduced internal buffer leads to shorter blocking delay, and might prevent LED glitches
+  #endif
     if (file) {
       presetsCachedTime = presetsModifiedTime;
       presetsCachedValidate = cacheInvalidate;
