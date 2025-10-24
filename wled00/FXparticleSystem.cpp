@@ -1789,7 +1789,7 @@ uint32_t calculateNumberOfParticles1D(const uint32_t fraction, const bool isadva
   numberofParticles = numberofParticles < 20 ? 20 : numberofParticles; // 20 minimum
   //make sure it is a multiple of 4 for proper memory alignment (easier than using padding bytes)
   numberofParticles = (numberofParticles+3) & ~0x03; // note: with a separate particle buffer, this is probably unnecessary
-  PSPRINTLN(" calc numparticles:" + String(numberofParticles))
+  PSPRINTLN(" calc numparticles:" + String(numberofParticles));
   return numberofParticles;
 }
 

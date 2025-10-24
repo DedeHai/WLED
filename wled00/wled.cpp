@@ -382,13 +382,13 @@ void WLED::loop()
 #endif
 #ifdef WLED_DEBUG_HEAP
   if (millis() - debugTime > 4999 ) { // WLEDMM: Special case for debugging heap faster
-    DEBUG_PRINT(F("*** Free heap: "));     DEBUG_PRINT(heap_caps_get_free_size(0x1800));
-    DEBUG_PRINT(F("\tLargest free block: "));     DEBUG_PRINT(heap_caps_get_largest_free_block(0x1800));
-    DEBUG_PRINT(F(" *** \t\tArduino min free stack: ")); DEBUG_PRINT(uxTaskGetStackHighWaterMark(NULL));
+    USER_PRINT(F("*** Free heap: "));     USER_PRINT(heap_caps_get_free_size(0x1800));
+    USER_PRINT(F("\tLargest free block: "));     USER_PRINT(heap_caps_get_largest_free_block(0x1800));
+    USER_PRINT(F(" *** \t\tArduino min free stack: ")); USER_PRINT(uxTaskGetStackHighWaterMark(NULL));
 #if INCLUDE_xTaskGetHandle
-    DEBUG_PRINT(F("   TCP min free stack: ")); DEBUG_PRINT(wledmm_get_tcp_stacksize());
+    USER_PRINT(F("   TCP min free stack: ")); USER_PRINT(wledmm_get_tcp_stacksize());
 #endif
-    DEBUG_PRINTLN(F(" ***"));    
+    USER_PRINTLN(F(" ***"));    
     debugTime = millis();
   }
 #endif        // WLED_DEBUG_HEAP

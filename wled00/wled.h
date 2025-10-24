@@ -880,7 +880,7 @@ WLED_GLOBAL volatile uint8_t jsonBufferLock _INIT(0);
 #endif
 
 // debug macro variable definitions
-#ifdef WLED_DEBUG
+#if defined(WLED_DEBUG) || defined(WLED_DEBUG_HEAP)
   WLED_GLOBAL unsigned long debugTime _INIT(0);
   WLED_GLOBAL int lastWifiState _INIT(3);
   WLED_GLOBAL unsigned long wifiStateChangedTime _INIT(0);
