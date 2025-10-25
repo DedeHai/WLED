@@ -601,7 +601,7 @@
 #define WLED_O2_ATTR __attribute__((optimize("O2")))
 
 #if !defined(WLEDMM_SAVE_FLASH) // WLEDMM
-#define WLED_O3_ATTR __attribute__((optimize("O3,fast_math")))
+#define WLED_O3_ATTR __attribute__((optimize("O3,fast-math")))
 #else
 #define WLED_O3_ATTR WLED_O2_ATTR   // -O3 increases flash size due to loop unrolling
 #endif
