@@ -673,7 +673,7 @@ Sample:
 */
 void decodeIRJson(uint32_t code)
 {
-  char objKey[10];
+  char objKey[16] = {'\0'}; // WLEDMM: 13 chars, not 9!  '"0x' + 'FFFFFFFF' + '":' + '\0'
   String cmdStr;
   JsonObject fdo;
   JsonObject jsonCmdObj;
