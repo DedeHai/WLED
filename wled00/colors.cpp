@@ -8,8 +8,9 @@
 /*
  * color blend function
  */
-uint32_t WLED_O2_ATTR IRAM_ATTR __attribute__((hot)) color_blend(uint32_t color1, uint32_t color2, uint_fast16_t blend, bool b16) {
-  if ((color1 == color2) || (blend == 0)) return color1; // WLEDMM
+uint32_t WLED_O3_ATTR IRAM_ATTR_YN __attribute__((hot)) color_blend(uint32_t color1, uint32_t color2, uint_fast16_t blend, bool b16) {
+  // min / max blend checking is omitted: calls with 0 or 255 are rare, checking lowers overall performance
+  //if ((color1 == color2) || (blend == 0)) return color1; // WLEDMM
   const uint_fast16_t blendmax = b16 ? 0xFFFF : 0xFF;
   if(blend >= blendmax) return color2;
   const uint_fast8_t shift = b16 ? 16 : 8;
@@ -80,7 +81,7 @@ uint32_t WLED_O2_ATTR color_add(uint32_t c1, uint32_t c2, bool fast)   // WLEDMM
  * if using "video" method the resulting color will never become black unless it is already black
  */
 
-uint32_t IRAM_ATTR_YN __attribute__((hot)) color_fade(uint32_t c1, uint8_t amount, bool video)
+uint32_t WLED_O2_ATTR IRAM_ATTR_YN __attribute__((hot)) color_fade(uint32_t c1, uint8_t amount, bool video)
 {
   if (c1 == 0 || amount == 0) return 0; // black or no change
   if (amount == 255) return c1;

@@ -25,8 +25,9 @@
 /*
  * color blend function (from colors.cpp)
  */
-inline __attribute__((hot,const)) uint32_t color_blend(uint32_t color1, uint32_t color2, uint_fast16_t blend, bool b16=false) {
-  if ((color1 == color2) || (blend == 0)) return color1; // WLEDMM
+inline WLED_O3_ATTR __attribute__((hot,const)) uint32_t color_blend(uint32_t color1, uint32_t color2, uint_fast16_t blend, bool b16=false) {
+  // min / max blend checking is omitted: calls with 0 or 255 are rare, checking lowers overall performance
+  // if ((color1 == color2) || (blend == 0)) return color1; // WLEDMM
   const uint_fast16_t blendmax = b16 ? 0xFFFF : 0xFF;
   if(blend >= blendmax) return color2;
   const uint_fast8_t shift = b16 ? 16 : 8;
@@ -64,7 +65,7 @@ inline __attribute__((hot,const)) uint32_t color_blend(uint32_t color1, uint32_t
  * idea: https://github.com/Aircoookie/WLED/pull/2465 by https://github.com/Proto-molecule
  */
 
-inline __attribute__((hot,const)) uint32_t color_add(uint32_t c1, uint32_t c2, bool fast=false)
+inline WLED_O3_ATTR __attribute__((hot,const)) uint32_t color_add(uint32_t c1, uint32_t c2, bool fast=false)
 {
   if (c2 == 0) return c1;  // WLEDMM shortcut
   if (c1 == 0) return c2;  // WLEDMM shortcut
@@ -98,7 +99,7 @@ inline __attribute__((hot,const)) uint32_t color_add(uint32_t c1, uint32_t c2, b
  * if using "video" method the resulting color will never become black unless it is already black
  */
 
-inline __attribute__((hot,const)) uint32_t color_fade(uint32_t c1, uint8_t amount, bool video=false)
+inline WLED_O2_ATTR __attribute__((hot,const)) uint32_t color_fade(uint32_t c1, uint8_t amount, bool video=false)
 {
   if (c1 == 0 || amount == 0) return 0; // black or no change
   if (amount == 255) return c1;
