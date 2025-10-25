@@ -111,12 +111,12 @@
 
 // sanity checks
 #ifdef ARDUINO_ARCH_ESP32
-  // we need more space in for oappend() stack buffer -> SETTINGS_STACK_BUF_SIZE and CONFIG_ASYNC_TCP_TASK_STACK_SIZE
+  // we need more space in for oappend() stack buffer -> SETTINGS_STACK_BUF_SIZE and CONFIG_ASYNC_TCP_STACK_SIZE
   #if SETTINGS_STACK_BUF_SIZE < 3904    // 3904 is required for WLEDMM-0.14.0-b28
     #warning please increase SETTINGS_STACK_BUF_SIZE >= 3904
   #endif
-  #if (CONFIG_ASYNC_TCP_TASK_STACK_SIZE - SETTINGS_STACK_BUF_SIZE) < 4352 // at least 4096+256 words of free task stack is needed by async_tcp alone
-    #error remaining async_tcp stack will be too low - please increase CONFIG_ASYNC_TCP_TASK_STACK_SIZE
+  #if (CONFIG_ASYNC_TCP_STACK_SIZE - SETTINGS_STACK_BUF_SIZE) < 4352 // at least 4096+256 words of free task stack is needed by async_tcp alone
+    #error remaining async_tcp stack will be too low - please increase CONFIG_ASYNC_TCP_STACK_SIZE
   #endif
 #endif
 
