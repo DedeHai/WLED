@@ -340,10 +340,14 @@ uint8_t extractModeSlider(uint8_t mode, uint8_t slider, char *dest, uint8_t maxL
                 strncpy_P(dest, tmpstr, maxLen); // copy the name into buffer (replacing previous)
                 dest[maxLen-1] = '\0';
               } else {
-                if (nameEnd<0) tmpstr = names.substring(nameBegin).c_str(); // did not find ",", last name?
-                else           tmpstr = names.substring(nameBegin, nameEnd).c_str();
-                strlcpy(dest, tmpstr, maxLen); // copy the name into buffer (replacing previous)
-              }
+                // WLEDMM bugfix for WLED-MM #272
+                // names.substring(...).c_str() returns a pointer to a temporary; it’s invalid by the next statement. Added result buffer "sub" to avoid use-after-free
+                //   if (nameEnd<0) tmpstr = names.substring(nameBegin).c_str(); // did not find ",", last name?
+                //   else           tmpstr = names.substring(nameBegin, nameEnd).c_str();
+                // strlcpy(dest, tmpstr, maxLen); // copy the name into buffer (replacing previous)
+                String sub = (nameEnd<0) ? names.substring(nameBegin) : names.substring(nameBegin, nameEnd);
+                strlcpy(dest, sub.c_str(), maxLen); // copy the name into buffer (replacing previous)
+			  }
             }
             nameBegin = nameEnd+1; // next name (if "," is not found it will be 0)
           } // next slider
