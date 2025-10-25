@@ -47,7 +47,7 @@ uint32_t WLED_O3_ATTR IRAM_ATTR_YN __attribute__((hot)) color_blend(uint32_t col
  * color add function that preserves ratio
  * idea: https://github.com/Aircoookie/WLED/pull/2465 by https://github.com/Proto-molecule
  */
-uint32_t WLED_O2_ATTR color_add(uint32_t c1, uint32_t c2, bool fast)   // WLEDMM added IRAM_ATTR_YN
+uint32_t WLED_O2_ATTR IRAM_ATTR_YN color_add(uint32_t c1, uint32_t c2, bool fast)   // WLEDMM added IRAM_ATTR_YN
 {
   if (c2 == 0) return c1;  // WLEDMM shortcut
   if (c1 == 0) return c2;  // WLEDMM shortcut

@@ -938,7 +938,7 @@ static void xyFromBlock(uint16_t &x,uint16_t &y, uint16_t i, uint16_t vW, uint16
 
 }
 
-void WLED_O2_ATTR __attribute__((hot)) Segment::setPixelColor(int i, uint32_t col) //WLEDMM: IRAM_ATTR conditionally
+void IRAM_ATTR_YN WLED_O2_ATTR __attribute__((hot)) Segment::setPixelColor(int i, uint32_t col) //WLEDMM: IRAM_ATTR conditionally
 {
   if (!isActive()) return; // not active
 #ifndef WLED_DISABLE_2D
