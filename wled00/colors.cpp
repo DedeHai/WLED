@@ -100,7 +100,8 @@ IRAM_ATTR_YN __attribute__((hot)) uint32_t color_fade(uint32_t c1, uint8_t amoun
   uint32_t rb = (((c1 & TWO_CHANNEL_MASK) * amount) >> 8) &  TWO_CHANNEL_MASK; // scale red and blue
   uint32_t wg = (((c1 >> 8) & TWO_CHANNEL_MASK) * amount) & ~TWO_CHANNEL_MASK; // scale white and green
   return (rb | wg) + addRemains;
-}#endif
+}
+#endif
 
 void setRandomColor(byte* rgb)
 {
