@@ -9771,6 +9771,7 @@ uint16_t mode_particleSparkler(void) {
   if (SEGMENT.call == 0) { // initialization
     if (!initParticleSystem1D(PartSys, 16, 128 ,0, true)) // init, no additional data needed
       return mode_static(); // allocation failed or is single pixel
+      PartSys->setKillOutOfBounds(true);
   } else
     PartSys = reinterpret_cast<ParticleSystem1D *>(SEGENV.data); // if not first call, just set the pointer to the PS
   if (PartSys == nullptr)
@@ -9789,7 +9790,7 @@ uint16_t mode_particleSparkler(void) {
   for (uint32_t i = 0; i < numSparklers; i++) {
     PartSys->sources[i].source.hue = hw_random16();
     PartSys->sources[i].var = 0; // sparks stationary
-    PartSys->sources[i].minLife = 150 + SEGMENT.intensity;
+    PartSys->sources[i].minLife = 250 + SEGMENT.intensity;
     PartSys->sources[i].maxLife = 250 + (SEGMENT.intensity << 1);
     int32_t speed = SEGMENT.speed >> 1;
     if (SEGMENT.check1) // sparks move (slide option)
@@ -9801,33 +9802,33 @@ uint16_t mode_particleSparkler(void) {
     if (SEGMENT.speed == 255) // random position at highest speed setting
       PartSys->sources[i].source.x = hw_random16(PartSys->maxX);
     else
-      PartSys->particleMoveUpdate(PartSys->sources[i].source, PartSys->sources[i].sourceFlags, &sparklersettings); //move sparkler
+      PartSys->particleMoveUpdate(PartSys->sources[i].source, PartSys->sources[i].sourceFlags, &sparklersettings); // move sparkler
   }
 
   numSparklers = min(1 + (SEGMENT.custom3 >> 1), (int)numSparklers);  // set used sparklers, 1 to 16
 
-  if (SEGENV.aux0 != SEGMENT.custom3) { //number of used sparklers changed, redistribute
+  if (SEGENV.aux0 != SEGMENT.custom3) { // number of used sparklers changed, redistribute
     for (uint32_t i = 1; i < numSparklers; i++) {
-      PartSys->sources[i].source.x = (PartSys->sources[0].source.x + (PartSys->maxX / numSparklers) * i ) % PartSys->maxX; //distribute evenly
+      PartSys->sources[i].source.x = (PartSys->sources[0].source.x + (PartSys->maxX / numSparklers) * i ) % PartSys->maxX; // distribute evenly
     }
   }
   SEGENV.aux0 = SEGMENT.custom3;
 
   for (uint32_t i = 0; i < numSparklers; i++) {
-    if (hw_random()  % (((271 - SEGMENT.intensity) >> 4)) == 0)
-      PartSys->sprayEmit(PartSys->sources[i]); //emit a particle
+    if (hw_random()  % (256 / (1 + (SEGMENT.intensity >> 2))) == 0)
+      PartSys->sprayEmit(PartSys->sources[i]); // emit a particle
   }
 
   PartSys->update(); // update and render
 
   for (uint32_t i = 0; i < PartSys->usedParticles; i++) {
-    if (PartSys->particles[i].ttl > (64 - (SEGMENT.intensity >> 2))) PartSys->particles[i].ttl -= (64 - (SEGMENT.intensity >> 2)); //ttl is linked to brightness, this allows to use higher brightness but still a short spark lifespan
+    if (PartSys->particles[i].ttl > (270 - SEGMENT.intensity)) PartSys->particles[i].ttl -= (64 - (SEGMENT.intensity >> 2)); // ttl is linked to brightness, this allows to use higher brightness but still a short spark lifespan
     else PartSys->particles[i].ttl = 0;
   }
 
   return FRAMETIME;
 }
-static const char _data_FX_MODE_PS_SPARKLER[] PROGMEM = "PS Sparkler@Move,!,Saturation,Blur,Sparklers,Slide,Bounce,Large;,!;!;1;pal=0,sx=255,c1=0,c2=0,c3=6";
+static const char _data_FX_MODE_PS_SPARKLER[] PROGMEM = "PS Sparkler@Move,!,Color,Blur,Sparklers,Slide,Bounce,Large;,!;!;1;pal=15,sx=255,ix=0,c1=0,c2=0,c3=12";
 
 /*
   Particle based Hourglass, particles falling at defined intervals
