@@ -8678,6 +8678,129 @@ uint16_t mode_particlewaterfall(void) {
   return FRAMETIME;
 }
 static const char _data_FX_MODE_PARTICLEWATERFALL[] PROGMEM = "PS Waterfall@Speed,Intensity,Variation,Collide,Position,Cylinder,Walls,Ground;;!;2;pal=9,sx=15,ix=200,c1=32,c2=160,o3=1";
+// Integer-only metaball overlay for WLED-style segment rendering.
+// Call after PartSys->update(); to draw blob overlay on top of existing particles.
+// Faster metaball overlay (integer math, subpixel distances, RGB blend).
+// Call after PartSys->update().
+
+struct ColorAccum {
+  uint32_t r = 0, g = 0, b = 0, w = 0; // sums of rgb*weight and total weight
+};
+
+void renderMetaballOverlay(const ParticleSystem2D* PartSys) {
+  const int W = SEGMENT.vWidth();
+  const int H = SEGMENT.vHeight();
+
+  // Tunables (your current runtime-driven values)
+  constexpr int RADIUS_PX       = 6;                     // influence radius in pixels
+  uint16_t     THRESH           = SEGMENT.custom2;       // lower -> more fill between particles
+  uint16_t     MAX_W            = SEGMENT.custom3 << 3;  // peak weight per particle center (pre scaling)
+  uint8_t      FIELD_SCALE      = 4;                     // global gain on per-hit weight
+  constexpr uint16_t BRIGHT_MUL = 2;
+  constexpr uint8_t  BRIGHT_SHIFT = 0;
+
+  // Subpixel constants
+  constexpr int32_t SUB      = PS_P_RADIUS;
+  constexpr int32_t HALF_SUB = PS_P_RADIUS / 2;
+  const int32_t radiusSub  = RADIUS_PX * SUB;
+  const int32_t radiusSub2 = radiusSub * radiusSub;      // fits 32-bit for your sizes
+
+  // Precompute scale to replace per-pixel divide: w = (delta * scaleFP) >> SCALE_SHIFT
+  constexpr uint8_t SCALE_SHIFT = 12;
+  uint32_t scaleFP = ((uint32_t)MAX_W * FIELD_SCALE << SCALE_SHIFT) / (uint32_t)radiusSub2;
+
+  // Buffers sized to matrix
+  static std::vector<uint16_t> field;   // 16-bit to avoid clipping artifacts
+  static std::vector<ColorAccum> accum;
+  const int N = W * H;
+  if ((int)field.size() != N) {
+    field.assign(N, 0);
+    accum.assign(N, {});
+  } else {
+    std::fill(field.begin(), field.end(), 0);
+    std::fill(accum.begin(), accum.end(), ColorAccum{});
+  }
+
+  // Accumulate influence per particle (integer math, subpixel distances)
+  const uint16_t used = PartSys->usedParticles;
+  for (uint16_t p = 0; p < used; p++) {
+    const auto& par   = PartSys->particles[p];
+    const auto& flags = PartSys->particleFlags[p];
+    if (!flags.perpetual || par.ttl < 5) continue; // skip dead
+
+    const int32_t cxSub = (int32_t)par.x; // PS_P_RADIUS units
+    const int32_t cySub = (int32_t)par.y;
+    const uint8_t hue   = par.hue;
+
+    const int cxPix = cxSub / SUB;
+    const int cyPix = cySub / SUB;
+    const int y0 = max(0, cyPix - RADIUS_PX);
+    const int y1 = min(H - 1, cyPix + RADIUS_PX);
+    const int x0 = max(0, cxPix - RADIUS_PX);
+    const int x1 = min(W - 1, cxPix + RADIUS_PX);
+
+    // Convert palette once per particle
+    CRGBW base = ColorFromPaletteWLED(SEGPALETTE, hue, 255);
+
+    for (int y = y0; y <= y1; y++) {
+      const int32_t pySub = y * SUB + HALF_SUB;
+      const int32_t dySub = pySub - cySub;
+      const int32_t dy2   = dySub * dySub;
+      for (int x = x0; x <= x1; x++) {
+        const int32_t pxSub = x * SUB + HALF_SUB;
+        const int32_t dxSub = pxSub - cxSub;
+        const int32_t r2sub = dxSub * dxSub + dy2;
+        const int32_t delta = radiusSub2 - r2sub;
+        if (delta <= 0) continue;
+
+        // w = (delta * scaleFP) >> SCALE_SHIFT
+        uint16_t w = (uint16_t)(((uint32_t)delta * scaleFP) >> SCALE_SHIFT);
+
+        const int idx = y * W + x;
+        field[idx] += w;
+        accum[idx].w += w;
+        accum[idx].r += (uint32_t)base.r * w;
+        accum[idx].g += (uint32_t)base.g * w;
+        accum[idx].b += (uint32_t)base.b * w;
+      }
+    }
+  }
+
+  // Render overlay (invert Y for output)
+  for (int y = 0; y < H; y++) {
+    const int yOut = H - 1 - y; // invert once per row
+    for (int x = 0; x < W; x++) {
+      const int idx = y * W + x;
+      const uint16_t f = field[idx];
+      if (f <= THRESH) continue;
+
+      uint32_t delta = (uint32_t)(f - THRESH);
+      uint32_t v32   = (delta * BRIGHT_MUL) >> BRIGHT_SHIFT;
+      if (v32 > 255) v32 = 255;
+      uint8_t v = (uint8_t)v32;
+
+      if (accum[idx].w == 0) continue;
+      uint8_t r = accum[idx].r / accum[idx].w;
+      uint8_t g = accum[idx].g / accum[idx].w;
+      uint8_t b = accum[idx].b / accum[idx].w;
+
+      // Scale by brightness
+      r = scale8(r, v);
+      g = scale8(g, v);
+      b = scale8(b, v);
+
+      CRGBW color(r, g, b);
+      SEGMENT.setPixelColorXY(
+        x, yOut,
+        color_add((uint32_t)color, SEGMENT.getPixelColorXY(x, yOut), true)
+      );
+    }
+  }
+
+ SEGMENT.blur(80);
+}
+
+
 
 /*
   Particle Box, applies gravity to particles in either a random direction or random but only downwards (sloshing)
@@ -8685,87 +8808,135 @@ static const char _data_FX_MODE_PARTICLEWATERFALL[] PROGMEM = "PS Waterfall@Spee
   by DedeHai (Damian Schneider)
 */
 uint16_t mode_particlebox(void) {
-  ParticleSystem2D *PartSys = nullptr;
-  uint32_t i;
 
-  if (SEGMENT.call == 0) { // initialization
-    if (!initParticleSystem2D(PartSys, 1, 0, true)) // init
-      return mode_static(); // allocation failed or not 2D
-    PartSys->setBounceX(true);
-    PartSys->setBounceY(true);
-    SEGENV.aux0 = hw_random16(); // position in perlin noise
+ ParticleSystem2D *PartSys = nullptr;
+
+  if (SEGMENT.call == 0) {
+    if (!initParticleSystem2D(PartSys, 1, 0, true))
+      return mode_static();
+  
+  //  PartSys->setBounceY(true);
+    PartSys->setWallHardness(0);
+    PartSys->setMotionBlur(20);
+    
+    SEGENV.aux0 = hw_random16(); // phase for swirl
+  } else {
+    PartSys = reinterpret_cast<ParticleSystem2D *>(SEGENV.data);
   }
-  else
-    PartSys = reinterpret_cast<ParticleSystem2D *>(SEGENV.data); // if not first call, just set the pointer to the PS
+  if (!PartSys) return mode_static();
 
-  if (PartSys == nullptr)
-    return mode_static(); // something went wrong, no data!
+  PartSys->updateSystem();
+  //PartSys->enableParticleCollisions(SEGMENT.custom2 > 0, SEGMENT.custom2);
+  //PartSys->setCollisionHardness(SEGMENT.custom2);
+    PartSys->setBounceX(SEGMENT.check1);
+    PartSys->setWrapX(!SEGMENT.check1);
+      PartSys->setBounceY(true);
 
-  PartSys->updateSystem(); // update system properties (dimensions and data pointers)
-  PartSys->setWallHardness(min(SEGMENT.custom2, (uint8_t)200)); // wall hardness is 200 or more
-  PartSys->enableParticleCollisions(true, max(2, (int)SEGMENT.custom2)); // enable collisions and set particle collision hardness
-  int maxParticleSize = min(((SEGMENT.vWidth() * SEGMENT.vHeight()) >> 2), 255U); // max particle size based on matrix size
-  unsigned currentParticleSize = map(SEGMENT.custom3, 0, 31, 0, maxParticleSize);
-  PartSys->setUsedParticles(map(SEGMENT.intensity, 0, 255, 2, 153) / (1 + (currentParticleSize >> 4))); // 1% - 60%, reduce if using larger size
-  if (SEGMENT.custom3 < 31)
-    PartSys->setParticleSize(currentParticleSize); // set global size if not max (resets perParticleSize)
-  else
-    PartSys->perParticleSize = true; // per particle size, uses advPartProps.size (randomized below)
+  // Particle sizing & count
+  int maxParticleSize = min(((SEGMENT.vWidth() * SEGMENT.vHeight()) >> 2), 255U);
+  //unsigned currentParticleSize = map(SEGMENT.custom3, 0, 31, 0, maxParticleSize);
+  PartSys->setUsedParticles(SEGMENT.intensity>>3);
+//PartSys->setParticleSize(0);
+  //  PartSys->setParticleSize(1);
 
-  // add in new particles if amount has changed
-  for (i = 0; i < PartSys->usedParticles; i++) {
-    if (PartSys->particles[i].ttl < 260) { // initialize dead particles
-      PartSys->particles[i].ttl = 260; // full brigthness
-      PartSys->particles[i].x = hw_random16(PartSys->maxX);
-      PartSys->particles[i].y = hw_random16(PartSys->maxY);
-      PartSys->particles[i].hue = hw_random8(); // make it colorful
-      PartSys->particleFlags[i].perpetual = true; // never die
-      PartSys->particleFlags[i].collide = true; // all particles colllide
-      PartSys->advPartProps[i].size = hw_random8(maxParticleSize); // random size, used only if size is set to max (SEGMENT.custom3=31)
-      break; // only spawn one particle per frame for less chaotic transitions
+  // Spawn / recycle
+  for (uint16_t i = 0; i < PartSys->usedParticles; i++) {
+    if (PartSys->particles[i].ttl < 260) {
+      PartSys->particles[i].ttl = 720;                   // mid-heat
+      PartSys->particles[i].x   = hw_random16(PartSys->maxX);
+      PartSys->particles[i].y   = PartSys->maxY - 1;     // near bottom
+      PartSys->particles[i].hue = hw_random8();
+      PartSys->particleFlags[i].perpetual = true; // no automatic ttl decrement, we use it as heat of particle
+      PartSys->particleFlags[i].collide   = true;
+      PartSys->advPartProps[i].size = hw_random8(maxParticleSize);
     }
-  }
-
-  if (SEGMENT.call % (((255 - SEGMENT.speed) >> 6) + 1) == 0 && SEGMENT.speed > 0) { // how often the force is applied depends on speed setting
-    int32_t xgravity;
-    int32_t ygravity;
-    int32_t increment = (SEGMENT.speed >> 6) + 1;
-
-    if (SEGMENT.check2) { // washing machine
-      int speed = tristate_square8(strip.now >> 7, 90, 15) / ((400 - SEGMENT.speed) >> 3);
-      SEGENV.aux0 += speed;
-      if (speed == 0) SEGENV.aux0 = 190; //down (= 270°)
-    }
-    else
-      SEGENV.aux0 -= increment;
-
-    if (SEGMENT.check1) { // random, use perlin noise
-      xgravity = ((int16_t)perlin8(SEGENV.aux0) - 127);
-      ygravity = ((int16_t)perlin8(SEGENV.aux0 + 10000) - 127);
-      // scale the gravity force
-      xgravity = (xgravity * SEGMENT.custom1) / 128;
-      ygravity = (ygravity * SEGMENT.custom1) / 128;
-    }
-    else { // go in a circle
-      xgravity = ((int32_t)(SEGMENT.custom1) * cos16_t(SEGENV.aux0 << 8)) / 0xFFFF;
-      ygravity = ((int32_t)(SEGMENT.custom1) * sin16_t(SEGENV.aux0 << 8)) / 0xFFFF;
-    }
-    if (SEGMENT.check3) { // sloshing, y force is always downwards
-      if (ygravity > 0)
-        ygravity = -ygravity;
-    }
-
-    PartSys->applyForce(xgravity, ygravity);
   }
 
-  if ((SEGMENT.call & 0x0F) == 0) // every 16th frame
-    PartSys->applyFriction(1);
+  const int H = PartSys->maxY; // physics Y: 0 = top, increases downward
+  const int W = PartSys->maxX; // physics Y: 0 = top, increases downward
+  const int midY = H / 2;
 
-  PartSys->update();   // update and render
+
+
+  // Per-particle heat update & buoyancy
+  for (uint16_t i = 0; i < PartSys->usedParticles; i++) {
+    auto &p  = PartSys->particles[i];
+    auto &pf = PartSys->particleFlags[i];
+    if (!pf.perpetual) continue;
+
+    // Heat change by vertical position
+  //  if(SEGMENT.call % 4 == 0)  // slow heat update
+  //  {
+    if(hw_random8() < 10) { // apply heat not every frame, at random to generate some variance between particles, othwerise they tend to sync up
+      if (p.y < (midY-(H>>2))) {
+        //p.ttl += hw_random8((midY - p.y) >> 6); // warms in lower quarter
+        p.ttl += 1 + 3*(hw_random() & 1); // add even more randomness
+      } else if (p.y > (midY+(H>>2))) {
+         p.ttl -= 1 + 3*(hw_random() & 1);//p.ttl -= hw_random8((p.y - midY) >> 6); // cools in upper quarter
+      }
+    }
+    /*
+    if(p.y > (H - (H >> 2)) && p.vy > 0) {
+      p.vy--; // slow down near the top and diverge the speed sideways towards the edge
+      if(p.x < ((W >> 1) )) {
+        p.vx -= 1;
+      } else if (p.x > ((W >> 1)))
+       {
+        p.vx += 1;
+      }
+    }*/
+
+    //}
+    // Clamp heat
+    if (p.ttl > 1000) p.ttl = 1000;
+    if (p.ttl < 350) p.ttl = 350;
+
+  //  if(hw_random8() < 100 || p.y > H - (H >> 5) || p.y < (H >> 5)) { // apply more often near top/bottom
+      if (p.ttl > 750) {
+        PartSys->applyForce(i, 0, SEGMENT.speed >> 3); // rise
+      } else if (p.ttl < 700) {
+        PartSys->applyForce(i, 0, -(SEGMENT.speed >> 3));  // sink
+      } else {
+        p.ttl += hw_random8(5) - 2; // slight random walk in mid heat
+      }
+/*
+        if(hw_random8() < 10) {
+          int32_t xforce = perlin16((i<<15) + (strip.now << 3)) - 32767;
+          if(abs(xforce) > 8000) // deadzone
+            PartSys->applyForce(i, (xforce >= 0) ? 1 : -1, 0); // -> perlin noise, does not look gread, it seems too biased
+        }*/ 
+              if(hw_random8() < 50) {
+          int32_t xforce = (200 * cos16_t(((strip.now >> 4) + i * 40) << 6)) / 0x7FFF;
+          PartSys->applyForce(i, (xforce >= 0) ? 1 : -1, 0);
+        }
+         // apply attraction to all higher particles, randomize for more interesting patterns and less CPU load
+      for(int j = i + 1; j < PartSys->usedParticles; j++) {
+        if(hw_random8() < 64) {
+          if(abs(PartSys->particles[i].x - PartSys->particles[j].x) < (PS_P_RADIUS << 4) &&
+             abs(PartSys->particles[i].y - PartSys->particles[j].y) < (PS_P_RADIUS << 4))
+            PartSys->pointAttractor(j, PartSys->particles[i], SEGMENT.custom1, false);
+        }
+      }
+  //  }
+    // limit speed to make smooth things out
+     int8_t SPEED_LIMIT = 1 + (SEGMENT.speed >> 5);
+     p.vx = p.vx > SPEED_LIMIT ? SPEED_LIMIT : (p.vx < -SPEED_LIMIT ? -SPEED_LIMIT : p.vx);
+     p.vy = p.vy > SPEED_LIMIT ? SPEED_LIMIT : (p.vy < -SPEED_LIMIT ? -SPEED_LIMIT : p.vy);
+
+  }
+
+  // Global mild friction
+  if ((SEGMENT.call % 50) == 0) {
+//    PartSys->applyFriction(1);
+  }
+
+  PartSys->update(); // render particles
+  renderMetaballOverlay(PartSys); // render metaball overlay
 
   return FRAMETIME;
 }
-static const char _data_FX_MODE_PARTICLEBOX[] PROGMEM = "PS Box@!,Particles,Tilt,Hardness,Size,Random,Washing Machine,Sloshing;;!;2;pal=53,ix=50,c3=1,o1=1";
+static const char _data_FX_MODE_PARTICLEBOX[] PROGMEM = "Lava Lamp@!,Particles,Buoyancy,Hardness,Size,bounce;;!;2;pal=53,ix=50,c3=1,o1=1";
+
 
 /*
   Fuzzy Noise: Perlin noise 'gravity' mapping as in particles on 'noise hills' viewed from above
