@@ -1338,9 +1338,9 @@ static uint8_t _bottom    (uint8_t a, uint8_t b) { return b; }
 static uint8_t _add       (uint8_t a, uint8_t b) { unsigned t = a + b; return t > 255 ? 255 : t; }
 static uint8_t _subtract  (uint8_t a, uint8_t b) { return b > a ? (b - a) : 0; }
 static uint8_t _difference(uint8_t a, uint8_t b) { return b > a ? (b - a) : (a - b); }
-static uint8_t _average   (uint8_t a, uint8_t b) { return (a + b) >> 1; }
+static inline uint8_t _average   (uint8_t a, uint8_t b) { return (a + b) >> 1; }
 #if defined(ESP8266) || defined(CONFIG_IDF_TARGET_ESP32C3)
-static uint8_t _multiply  (uint8_t a, uint8_t b) { return ((a * b) + 255) >> 8; } // faster than division on C3 but slightly less accurate
+static inline uint8_t _multiply  (uint8_t a, uint8_t b) { return ((a * b) + 255) >> 8; } // faster than division on C3 but slightly less accurate
 #else
 static uint8_t _multiply  (uint8_t a, uint8_t b) { return (a * b) / 255; } // origianl uses a & b in range [0,1]
 #endif
@@ -1357,6 +1357,7 @@ static uint8_t _softlight (uint8_t a, uint8_t b) { return (b * b * (255 - 2 * a)
 #endif
 static uint8_t _dodge     (uint8_t a, uint8_t b) { return _divide(~a,b); }
 static uint8_t _burn      (uint8_t a, uint8_t b) { return ~_divide(a,~b); }
+static uint8_t _stencil   (uint8_t a, uint8_t b) { return a ? a : b; } // black = transparent
 
 void WS2812FX::blendSegment(const Segment &topSegment) const {
 
@@ -1365,7 +1366,7 @@ void WS2812FX::blendSegment(const Segment &topSegment) const {
     _top, _bottom,
     _add, _subtract, _difference, _average,
     _multiply, _divide, _lighten, _darken, _screen, _overlay,
-    _hardlight, _softlight, _dodge, _burn
+    _hardlight, _softlight, _dodge, _burn, _stencil
   };
 
   const size_t blendMode = topSegment.blendMode < (sizeof(funcs) / sizeof(FuncType)) ? topSegment.blendMode : 0;
