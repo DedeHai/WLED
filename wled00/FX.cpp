@@ -8692,9 +8692,9 @@ void renderMetaballOverlay(const ParticleSystem2D* PartSys) {
   const int H = SEGMENT.vHeight();
 
   // Tunables (your current runtime-driven values)
-  constexpr int RADIUS_PX       = 6;                     // influence radius in pixels
+ int RADIUS_PX                  = SEGMENT.custom3;                     // influence radius in pixels
   uint16_t     THRESH           = SEGMENT.custom2;       // lower -> more fill between particles
-  uint16_t     MAX_W            = SEGMENT.custom3 << 3;  // peak weight per particle center (pre scaling)
+  uint16_t     MAX_W            = 24;  // peak weight per particle center (pre scaling) -> is somewhat tied to size...
   uint8_t      FIELD_SCALE      = 4;                     // global gain on per-hit weight
   constexpr uint16_t BRIGHT_MUL = 2;
   constexpr uint8_t  BRIGHT_SHIFT = 0;
@@ -8710,14 +8710,14 @@ void renderMetaballOverlay(const ParticleSystem2D* PartSys) {
   uint32_t scaleFP = ((uint32_t)MAX_W * FIELD_SCALE << SCALE_SHIFT) / (uint32_t)radiusSub2;
 
   // Buffers sized to matrix
-  static std::vector<uint16_t> field;   // 16-bit to avoid clipping artifacts
+//  static std::vector<uint16_t> field;   // 16-bit to avoid clipping artifacts
   static std::vector<ColorAccum> accum;
   const int N = W * H;
-  if ((int)field.size() != N) {
-    field.assign(N, 0);
+  if ((int)accum.size() != N) {
+   //field.assign(N, 0);
     accum.assign(N, {});
   } else {
-    std::fill(field.begin(), field.end(), 0);
+  //  std::fill(field.begin(), field.end(), 0);
     std::fill(accum.begin(), accum.end(), ColorAccum{});
   }
 
@@ -8757,7 +8757,7 @@ void renderMetaballOverlay(const ParticleSystem2D* PartSys) {
         uint16_t w = (uint16_t)(((uint32_t)delta * scaleFP) >> SCALE_SHIFT);
 
         const int idx = y * W + x;
-        field[idx] += w;
+      //  field[idx] += w;
         accum[idx].w += w;
         accum[idx].r += (uint32_t)base.r * w;
         accum[idx].g += (uint32_t)base.g * w;
@@ -8765,13 +8765,13 @@ void renderMetaballOverlay(const ParticleSystem2D* PartSys) {
       }
     }
   }
-
+  //SEGMENT.fill(BLACK); // clear before overlay
   // Render overlay (invert Y for output)
   for (int y = 0; y < H; y++) {
     const int yOut = H - 1 - y; // invert once per row
     for (int x = 0; x < W; x++) {
       const int idx = y * W + x;
-      const uint16_t f = field[idx];
+      const uint16_t f = accum[idx].w;//field[idx];
       if (f <= THRESH) continue;
 
       uint32_t delta = (uint32_t)(f - THRESH);
@@ -8790,14 +8790,15 @@ void renderMetaballOverlay(const ParticleSystem2D* PartSys) {
       b = scale8(b, v);
 
       CRGBW color(r, g, b);
-      SEGMENT.setPixelColorXY(
-        x, yOut,
-        color_add((uint32_t)color, SEGMENT.getPixelColorXY(x, yOut), true)
-      );
+      //SEGMENT.setPixelColorXY(
+      //  x, yOut,
+      //  color_add((uint32_t)color, SEGMENT.getPixelColorXY(x, yOut), true)
+      //);
+      SEGMENT.setPixelColorXY(x, yOut,color);
     }
   }
 
- SEGMENT.blur(80);
+ SEGMENT.blur(10);
 }
 
 
@@ -8815,9 +8816,8 @@ uint16_t mode_particlebox(void) {
     if (!initParticleSystem2D(PartSys, 1, 0, true))
       return mode_static();
   
-  //  PartSys->setBounceY(true);
     PartSys->setWallHardness(0);
-    PartSys->setMotionBlur(20);
+  //  PartSys->setMotionBlur(20);
     
     SEGENV.aux0 = hw_random16(); // phase for swirl
   } else {
@@ -8911,10 +8911,14 @@ uint16_t mode_particlebox(void) {
         }
          // apply attraction to all higher particles, randomize for more interesting patterns and less CPU load
       for(int j = i + 1; j < PartSys->usedParticles; j++) {
-        if(hw_random8() < 64) {
+        if(hw_random8() < 32) {
+        /*  int dxsq = (PartSys->particles[i].x - PartSys->particles[j].x);
+          dxsq = dxsq * dxsq;
+          int dysq = (PartSys->particles[i].y - PartSys->particles[j].y);
+          dysq = dysq * dysq;
           if(abs(PartSys->particles[i].x - PartSys->particles[j].x) < (PS_P_RADIUS << 4) &&
-             abs(PartSys->particles[i].y - PartSys->particles[j].y) < (PS_P_RADIUS << 4))
-            PartSys->pointAttractor(j, PartSys->particles[i], SEGMENT.custom1, false);
+             abs(PartSys->particles[i].y - PartSys->particles[j].y) < (PS_P_RADIUS << 4))*/
+            PartSys->pointAttractor(j, PartSys->particles[i], SEGMENT.custom1-128, false);
         }
       }
   //  }
@@ -8926,16 +8930,18 @@ uint16_t mode_particlebox(void) {
   }
 
   // Global mild friction
-  if ((SEGMENT.call % 50) == 0) {
+//  if ((SEGMENT.call % 50) == 0) {
 //    PartSys->applyFriction(1);
-  }
+  //}
 
-  PartSys->update(); // render particles
+  for (uint32_t i = 0; i < PartSys->usedParticles; i++) {
+    PartSys->particleMoveUpdate(PartSys->particles[i], PartSys->particleFlags[i], nullptr, PartSys->advPartProps ? &PartSys->advPartProps[i] : nullptr); 
+  }
   renderMetaballOverlay(PartSys); // render metaball overlay
 
   return FRAMETIME;
 }
-static const char _data_FX_MODE_PARTICLEBOX[] PROGMEM = "Lava Lamp@!,Particles,Buoyancy,Hardness,Size,bounce;;!;2;pal=53,ix=50,c3=1,o1=1";
+static const char _data_FX_MODE_PARTICLEBOX[] PROGMEM = "Lava Lamp@!,Particles,Attract,Threshold,MaxW,bounce;;!;2;pal=53,ix=50,c3=1,o1=1";
 
 
 /*

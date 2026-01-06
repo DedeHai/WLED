@@ -160,7 +160,7 @@ public:
   void applyAngleForce(const int8_t force, const uint16_t angle); // apply angular force to all particles
   void applyFriction(PSparticle &part, const int32_t coefficient); // apply friction to specific particle
   void applyFriction(const int32_t coefficient); // apply friction to all used particles
-  void pointAttractor(const uint32_t particleindex, PSparticle &attractor, const uint8_t strength, const bool swallow);
+  void pointAttractor(const uint32_t particleindex, PSparticle &attractor, const int32_t strength, const bool swallow);
   // set options  note: inlining the set function uses more flash so dont optimize
   void setUsedParticles(const uint8_t percentage);  // set the percentage of particles used in the system, 255=100%
   void setCollisionHardness(const uint8_t hardness); // hardness for particle collisions (255 means full hard)

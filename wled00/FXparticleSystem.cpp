@@ -530,7 +530,7 @@ void ParticleSystem2D::applyFriction(const int32_t coefficient) {
 }
 
 // attracts a particle to an attractor particle using the inverse square-law
-void ParticleSystem2D::pointAttractor(const uint32_t particleindex, PSparticle &attractor, const uint8_t strength, const bool swallow) {
+void ParticleSystem2D::pointAttractor(const uint32_t particleindex, PSparticle &attractor, const int32_t strength, const bool swallow) {
   if (advPartProps == nullptr)
     return; // no advanced properties available
 
@@ -552,7 +552,7 @@ void ParticleSystem2D::pointAttractor(const uint32_t particleindex, PSparticle &
     distanceSquared = 2 * PS_P_RADIUS * PS_P_RADIUS; // limit the distance to avoid very high forces
   }
 
-  int32_t force = ((int32_t)strength << 16) / distanceSquared;
+  int32_t force = (strength << 16) / distanceSquared;
   int8_t xforce = (force * dx) / 1024; // scale to a lower value, found by experimenting
   int8_t yforce = (force * dy) / 1024; // note: cannot use bit shifts as bit shifting is asymmetrical (1>>1=0 / -1>>1=-1) and this needs to be accurate!
   applyForce(particleindex, xforce, yforce);
