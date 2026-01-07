@@ -8682,126 +8682,142 @@ static const char _data_FX_MODE_PARTICLEWATERFALL[] PROGMEM = "PS Waterfall@Spee
 // Call after PartSys->update(); to draw blob overlay on top of existing particles.
 // Faster metaball overlay (integer math, subpixel distances, RGB blend).
 // Call after PartSys->update().
-
-struct ColorAccum {
-  uint32_t r = 0, g = 0, b = 0, w = 0; // sums of rgb*weight and total weight
-};
+static uint16_t weight[4096];
+static uint16_t weight_size = 0;
 
 void renderMetaballOverlay(const ParticleSystem2D* PartSys) {
   const int W = SEGMENT.vWidth();
   const int H = SEGMENT.vHeight();
-
-  // Tunables (your current runtime-driven values)
- int RADIUS_PX                  = SEGMENT.custom3;                     // influence radius in pixels
-  uint16_t     THRESH           = SEGMENT.custom2;       // lower -> more fill between particles
-  uint16_t     MAX_W            = 24;  // peak weight per particle center (pre scaling) -> is somewhat tied to size...
-  uint8_t      FIELD_SCALE      = 4;                     // global gain on per-hit weight
-  constexpr uint16_t BRIGHT_MUL = 2;
-  constexpr uint8_t  BRIGHT_SHIFT = 0;
-
-  // Subpixel constants
-  constexpr int32_t SUB      = PS_P_RADIUS;
-  constexpr int32_t HALF_SUB = PS_P_RADIUS / 2;
-  const int32_t radiusSub  = RADIUS_PX * SUB;
-  const int32_t radiusSub2 = radiusSub * radiusSub;      // fits 32-bit for your sizes
-
-  // Precompute scale to replace per-pixel divide: w = (delta * scaleFP) >> SCALE_SHIFT
-  constexpr uint8_t SCALE_SHIFT = 12;
-  uint32_t scaleFP = ((uint32_t)MAX_W * FIELD_SCALE << SCALE_SHIFT) / (uint32_t)radiusSub2;
-
-  // Buffers sized to matrix
-//  static std::vector<uint16_t> field;   // 16-bit to avoid clipping artifacts
-  static std::vector<ColorAccum> accum;
   const int N = W * H;
-  if ((int)accum.size() != N) {
-   //field.assign(N, 0);
-    accum.assign(N, {});
-  } else {
-  //  std::fill(field.begin(), field.end(), 0);
-    std::fill(accum.begin(), accum.end(), ColorAccum{});
-  }
 
-  // Accumulate influence per particle (integer math, subpixel distances)
+  const int RADIUS_PX = SEGMENT.custom3 >> 2;
+  const uint16_t THRESH = SEGMENT.custom2;
+
+  constexpr int32_t SUB = PS_P_RADIUS;
+  constexpr int32_t HALF_SUB = PS_P_RADIUS / 2;
+  const int32_t radiusSub = RADIUS_PX * SUB;
+  const int32_t radiusSub2 = radiusSub * radiusSub;
+
+  if (weight_size != N) {
+    weight_size = N;
+  }
+  
+  // Clear framebuffer and weight buffer
+  SEGMENT.fill(BLACK); 
+  memset(weight, 0, N * sizeof(uint16_t));
+
+  // Accumulate weighted colors directly into framebuffer (8-bit)
+  // Strategy: Scale down colors before multiplying to prevent overflow
   const uint16_t used = PartSys->usedParticles;
   for (uint16_t p = 0; p < used; p++) {
-    const auto& par   = PartSys->particles[p];
+    const auto& par = PartSys->particles[p];
     const auto& flags = PartSys->particleFlags[p];
-    if (!flags.perpetual || par.ttl < 5) continue; // skip dead
+    if (!flags.perpetual || par.ttl < 5) continue;
 
-    const int32_t cxSub = (int32_t)par.x; // PS_P_RADIUS units
+    const int32_t cxSub = (int32_t)par.x;
     const int32_t cySub = (int32_t)par.y;
-    const uint8_t hue   = par.hue;
-
+    const uint8_t hue = par.hue;
     const int cxPix = cxSub / SUB;
     const int cyPix = cySub / SUB;
-    const int y0 = max(0, cyPix - RADIUS_PX);
-    const int y1 = min(H - 1, cyPix + RADIUS_PX);
-    const int x0 = max(0, cxPix - RADIUS_PX);
-    const int x1 = min(W - 1, cxPix + RADIUS_PX);
+    
+    const int y0 = (cyPix - RADIUS_PX) < 0 ? 0 : (cyPix - RADIUS_PX);
+    const int y1 = (cyPix + RADIUS_PX) >= H ? (H - 1) : (cyPix + RADIUS_PX);
+    const int x0 = (cxPix - RADIUS_PX) < 0 ? 0 : (cxPix - RADIUS_PX);
+    const int x1 = (cxPix + RADIUS_PX) >= W ? (W - 1) : (cxPix + RADIUS_PX);
 
-    // Convert palette once per particle
-    CRGBW base = ColorFromPaletteWLED(SEGPALETTE, hue, 255);
+    const CRGBW base = ColorFromPaletteWLED(SEGPALETTE, hue, 255);
 
     for (int y = y0; y <= y1; y++) {
       const int32_t pySub = y * SUB + HALF_SUB;
       const int32_t dySub = pySub - cySub;
-      const int32_t dy2   = dySub * dySub;
+      const int32_t dy2 = dySub * dySub;
+      const int row_offset = y * W;
+      
       for (int x = x0; x <= x1; x++) {
         const int32_t pxSub = x * SUB + HALF_SUB;
         const int32_t dxSub = pxSub - cxSub;
-        const int32_t r2sub = dxSub * dxSub + dy2;
-        const int32_t delta = radiusSub2 - r2sub;
-        if (delta <= 0) continue;
+        const int32_t dist2 = dxSub * dxSub + dy2;
+        
+        if (dist2 >= radiusSub2) continue;
 
-        // w = (delta * scaleFP) >> SCALE_SHIFT
-        uint16_t w = (uint16_t)(((uint32_t)delta * scaleFP) >> SCALE_SHIFT);
+        const uint32_t delta = radiusSub2 - dist2;
+      //  uint32_t w = (radiusSub2 > 65535)
+      //    ? (((delta >> 8) * 255) / (radiusSub2 >> 8))
+      //    : ((delta * 255) / radiusSub2);
+        uint32_t w = ((delta * 64) / radiusSub2); 
+        //if (w > 255) w = 255;
+        const uint16_t w8 = (uint8_t)w;
 
-        const int idx = y * W + x;
-      //  field[idx] += w;
-        accum[idx].w += w;
-        accum[idx].r += (uint32_t)base.r * w;
-        accum[idx].g += (uint32_t)base.g * w;
-        accum[idx].b += (uint32_t)base.b * w;
+        const int idx = row_offset + x;
+        
+        // Saturating add for weight to prevent overflow/wrapping
+        uint32_t new_weight = (uint32_t)weight[idx] + w8;
+        weight[idx] = (new_weight > 65535) ? 65535 : new_weight;
+        
+        // Accumulate color * weight into framebuffer
+        // Downscale colors to prevent saturation: divide by expected max weight
+        // With ~5 particles overlapping at 255 weight each, max sum ~1275
+        // So we divide by 16 to keep sum under 255: (color * weight) >> 12
+        // We'll compensate by << 4 when dividing by weight later
+        CRGBW current = SEGMENT.getPixelColorXY(x, H - 1 - y);
+        uint16_t new_r = current.r + ((base.r * w8) >> 10);
+        uint16_t new_g = current.g + ((base.g * w8) >> 10);
+        uint16_t new_b = current.b + ((base.b * w8) >> 10);
+        
+        // Should rarely saturate now, but clamp just in case
+        current.r = (new_r > 255) ? 255 : new_r;
+        current.g = (new_g > 255) ? 255 : new_g;
+        current.b = (new_b > 255) ? 255 : new_b;
+        
+        SEGMENT.setPixelColorXY(x, H - 1 - y, current);
       }
     }
   }
-  //SEGMENT.fill(BLACK); // clear before overlay
-  // Render overlay (invert Y for output)
+
+    // Normalize and apply narrow edge falloff
   for (int y = 0; y < H; y++) {
-    const int yOut = H - 1 - y; // invert once per row
+    const int yOut = H - 1 - y;
+    const int row_offset = y * W;
+    
     for (int x = 0; x < W; x++) {
-      const int idx = y * W + x;
-      const uint16_t f = accum[idx].w;//field[idx];
-      if (f <= THRESH) continue;
-
-      uint32_t delta = (uint32_t)(f - THRESH);
-      uint32_t v32   = (delta * BRIGHT_MUL) >> BRIGHT_SHIFT;
-      if (v32 > 255) v32 = 255;
-      uint8_t v = (uint8_t)v32;
-
-      if (accum[idx].w == 0) continue;
-      uint8_t r = accum[idx].r / accum[idx].w;
-      uint8_t g = accum[idx].g / accum[idx].w;
-      uint8_t b = accum[idx].b / accum[idx].w;
-
-      // Scale by brightness
-      r = scale8(r, v);
-      g = scale8(g, v);
-      b = scale8(b, v);
-
-      CRGBW color(r, g, b);
-      //SEGMENT.setPixelColorXY(
-      //  x, yOut,
-      //  color_add((uint32_t)color, SEGMENT.getPixelColorXY(x, yOut), true)
-      //);
-      SEGMENT.setPixelColorXY(x, yOut,color);
+      uint16_t w = weight[row_offset + x];
+      
+      if (w <= THRESH) {
+        SEGMENT.setPixelColorXY(x, yOut, BLACK);
+        continue;
+      }
+      
+      CRGBW color = SEGMENT.getPixelColorXY(x, yOut);
+      
+      uint16_t wClamped = (w > 255 * 4) ? 255 * 4 : w;
+      
+      uint16_t r16 = ((uint16_t)color.r * 4 * 255) / wClamped;
+      uint16_t g16 = ((uint16_t)color.g * 4 * 255) / wClamped;
+      uint16_t b16 = ((uint16_t)color.b * 4 * 255) / wClamped;
+      
+      color.r = (r16 > 255) ? 255 : r16;
+      color.g = (g16 > 255) ? 255 : g16;
+      color. b = (b16 > 255) ? 255 : b16;
+      
+      // Steep edge falloff ONLY in narrow band above threshold
+      const uint16_t EDGE_BAND = 24;  // brightness falloff band
+      uint16_t delta = w - THRESH;
+      if (delta < EDGE_BAND) {
+        // Steep ramp:  0 at threshold, 255 at threshold + EDGE_BAND
+        uint8_t edge = (delta * 255) / EDGE_BAND;
+        color.r = scale8(color.r, edge);
+        color.g = scale8(color.g, edge);
+        color.b = scale8(color.b, edge);
+      }
+      // else: full brightness, no scaling
+      
+      SEGMENT.setPixelColorXY(x, yOut, color);
     }
   }
 
- SEGMENT.blur(10);
+
+//  SEGMENT.blur(80);
 }
-
-
 
 /*
   Particle Box, applies gravity to particles in either a random direction or random but only downwards (sloshing)
@@ -8814,11 +8830,8 @@ uint16_t mode_particlebox(void) {
 
   if (SEGMENT.call == 0) {
     if (!initParticleSystem2D(PartSys, 1, 0, true))
-      return mode_static();
-  
     PartSys->setWallHardness(0);
-  //  PartSys->setMotionBlur(20);
-    
+
     SEGENV.aux0 = hw_random16(); // phase for swirl
   } else {
     PartSys = reinterpret_cast<ParticleSystem2D *>(SEGENV.data);
@@ -8828,15 +8841,15 @@ uint16_t mode_particlebox(void) {
   PartSys->updateSystem();
   //PartSys->enableParticleCollisions(SEGMENT.custom2 > 0, SEGMENT.custom2);
   //PartSys->setCollisionHardness(SEGMENT.custom2);
-    PartSys->setBounceX(SEGMENT.check1);
-    PartSys->setWrapX(!SEGMENT.check1);
-      PartSys->setBounceY(true);
+  PartSys->setBounceX(SEGMENT.check1);
+  PartSys->setWrapX(!SEGMENT.check1);
+  PartSys->setBounceY(true);
 
   // Particle sizing & count
   int maxParticleSize = min(((SEGMENT.vWidth() * SEGMENT.vHeight()) >> 2), 255U);
   //unsigned currentParticleSize = map(SEGMENT.custom3, 0, 31, 0, maxParticleSize);
   PartSys->setUsedParticles(SEGMENT.intensity>>3);
-//PartSys->setParticleSize(0);
+  PartSys->setParticleSize(0);
   //  PartSys->setParticleSize(1);
 
   // Spawn / recycle
@@ -8844,7 +8857,7 @@ uint16_t mode_particlebox(void) {
     if (PartSys->particles[i].ttl < 260) {
       PartSys->particles[i].ttl = 720;                   // mid-heat
       PartSys->particles[i].x   = hw_random16(PartSys->maxX);
-      PartSys->particles[i].y   = PartSys->maxY - 1;     // near bottom
+      PartSys->particles[i].y   = hw_random16(PartSys->maxY);
       PartSys->particles[i].hue = hw_random8();
       PartSys->particleFlags[i].perpetual = true; // no automatic ttl decrement, we use it as heat of particle
       PartSys->particleFlags[i].collide   = true;
@@ -8865,14 +8878,12 @@ uint16_t mode_particlebox(void) {
     if (!pf.perpetual) continue;
 
     // Heat change by vertical position
-  //  if(SEGMENT.call % 4 == 0)  // slow heat update
-  //  {
     if(hw_random8() < 10) { // apply heat not every frame, at random to generate some variance between particles, othwerise they tend to sync up
       if (p.y < (midY-(H>>2))) {
         //p.ttl += hw_random8((midY - p.y) >> 6); // warms in lower quarter
-        p.ttl += 1 + 3*(hw_random() & 1); // add even more randomness
+        p.ttl += 1 + 5*(hw_random() & 1); // add even more randomness
       } else if (p.y > (midY+(H>>2))) {
-         p.ttl -= 1 + 3*(hw_random() & 1);//p.ttl -= hw_random8((p.y - midY) >> 6); // cools in upper quarter
+         p.ttl -= 1 + 5*(hw_random() & 1);//p.ttl -= hw_random8((p.y - midY) >> 6); // cools in upper quarter
       }
     }
     /*
@@ -8886,48 +8897,58 @@ uint16_t mode_particlebox(void) {
       }
     }*/
 
-    //}
     // Clamp heat
     if (p.ttl > 1000) p.ttl = 1000;
     if (p.ttl < 350) p.ttl = 350;
 
   //  if(hw_random8() < 100 || p.y > H - (H >> 5) || p.y < (H >> 5)) { // apply more often near top/bottom
-      if (p.ttl > 750) {
-        PartSys->applyForce(i, 0, SEGMENT.speed >> 3); // rise
-      } else if (p.ttl < 700) {
-        PartSys->applyForce(i, 0, -(SEGMENT.speed >> 3));  // sink
-      } else {
-        p.ttl += hw_random8(5) - 2; // slight random walk in mid heat
-      }
-/*
-        if(hw_random8() < 10) {
-          int32_t xforce = perlin16((i<<15) + (strip.now << 3)) - 32767;
-          if(abs(xforce) > 8000) // deadzone
-            PartSys->applyForce(i, (xforce >= 0) ? 1 : -1, 0); // -> perlin noise, does not look gread, it seems too biased
-        }*/ 
-              if(hw_random8() < 50) {
-          int32_t xforce = (200 * cos16_t(((strip.now >> 4) + i * 40) << 6)) / 0x7FFF;
-          PartSys->applyForce(i, (xforce >= 0) ? 1 : -1, 0);
+    if (p.ttl > 750) {
+      PartSys->applyForce(i, 0, SEGMENT.speed >> 3); // rise
+    } else if (p.ttl < 700) {
+      PartSys->applyForce(i, 0, -(SEGMENT.speed >> 3));  // sink
+    } else {
+      p.ttl += hw_random8(5) - 2; // slight random walk in mid heat
+    }
+    /*
+    if(hw_random8() < 10) {
+      int32_t xforce = perlin16((i<<15) + (strip.now << 3)) - 32767;
+      if(abs(xforce) > 8000) // deadzone
+        PartSys->applyForce(i, (xforce >= 0) ? 1 : -1, 0); // -> perlin noise, does not look gread, it seems too biased
+    }*/ 
+    if(hw_random8() < 50) {
+      int32_t xforce = (200 * cos16_t(((strip.now >> 4) + i * 40) << 6)) / 0x7FFF;
+        PartSys->applyForce(i, (xforce >= 0) ? 1 : -1, 0);
         }
          // apply attraction to all higher particles, randomize for more interesting patterns and less CPU load
       for(int j = i + 1; j < PartSys->usedParticles; j++) {
         if(hw_random8() < 32) {
-        /*  int dxsq = (PartSys->particles[i].x - PartSys->particles[j].x);
-          dxsq = dxsq * dxsq;
-          int dysq = (PartSys->particles[i].y - PartSys->particles[j].y);
-          dysq = dysq * dysq;
-          if(abs(PartSys->particles[i].x - PartSys->particles[j].x) < (PS_P_RADIUS << 4) &&
-             abs(PartSys->particles[i].y - PartSys->particles[j].y) < (PS_P_RADIUS << 4))*/
-            PartSys->pointAttractor(j, PartSys->particles[i], SEGMENT.custom1-128, false);
+          int dx = (PartSys->particles[i].x - PartSys->particles[j].x);
+          if ( abs(dx) < (PS_P_RADIUS)) {
+            int dy = (PartSys->particles[i].y - PartSys->particles[j].y);
+            if ( abs(dy) < (PS_P_RADIUS)) {
+              // donate hue if close
+              int8_t dhue = PartSys->particles[i].hue - PartSys->particles[j].hue;
+              if(dhue > 0) {
+                PartSys->particles[j].hue++;
+              } else {
+                PartSys->particles[j].hue--;
+              }
+          }
+
+            int force = SEGMENT.custom1>>1;
+            if(hw_random8() < 32)  force = -force; // push sometimes to avoid clumping
+            PartSys->pointAttractor(j, PartSys->particles[i], force, false);
+          }
         }
       }
-  //  }
     // limit speed to make smooth things out
      int8_t SPEED_LIMIT = 1 + (SEGMENT.speed >> 5);
      p.vx = p.vx > SPEED_LIMIT ? SPEED_LIMIT : (p.vx < -SPEED_LIMIT ? -SPEED_LIMIT : p.vx);
      p.vy = p.vy > SPEED_LIMIT ? SPEED_LIMIT : (p.vy < -SPEED_LIMIT ? -SPEED_LIMIT : p.vy);
 
   }
+  if((SEGMENT.call & 0xFF) == 0) // once every 256 frames
+    PartSys->particles[hw_random16(PartSys->usedParticles)].hue = hw_random8(); // randomize hue of a random particle to prevent color lockup
 
   // Global mild friction
 //  if ((SEGMENT.call % 50) == 0) {
@@ -8937,11 +8958,12 @@ uint16_t mode_particlebox(void) {
   for (uint32_t i = 0; i < PartSys->usedParticles; i++) {
     PartSys->particleMoveUpdate(PartSys->particles[i], PartSys->particleFlags[i], nullptr, PartSys->advPartProps ? &PartSys->advPartProps[i] : nullptr); 
   }
+//  PartSys->update();
   renderMetaballOverlay(PartSys); // render metaball overlay
 
   return FRAMETIME;
 }
-static const char _data_FX_MODE_PARTICLEBOX[] PROGMEM = "Lava Lamp@!,Particles,Attract,Threshold,MaxW,bounce;;!;2;pal=53,ix=50,c3=1,o1=1";
+static const char _data_FX_MODE_PARTICLEBOX[] PROGMEM = "Lava Lamp@!,Particles,Attract,Threshold,Size,bounce;;!;2;pal=53,ix=50,c3=1,o1=1";
 
 
 /*
