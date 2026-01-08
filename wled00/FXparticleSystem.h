@@ -60,6 +60,12 @@ static inline int32_t limitSpeed(const int32_t speed) {
 #define PS_P_MINHARDRADIUS 64 // minimum hard surface radius for collisions
 #define PS_P_MINSURFACEHARDNESS 128 // minimum hardness used in collision impulse calculation, below this hardness, particles become sticky
 
+// blob rendering constants
+#define BLOBWEIGHTSHIFT 5 // shift for weight scaling in blob rendering (2^BLOBWEIGHTSHIFT = max added weight per particle per pixel)
+#define BLOBWEIGHTSCALE (1 << BLOBWEIGHTSHIFT) // weight scale for blob rendering, use this as a minimum threshold for good results
+#define BLOBCOLORSHIFT 2 // shift for color downscaling in blob rendering accumulation phase to avoid saturation
+#define BLOBEDGBANDSHIFT 3 // colors close to threshold are faded out over this band (2^BLOBEDGBANDSHIFT)
+
 // struct for PS settings (shared for 1D and 2D class)
 typedef union {
   struct{ // one byte bit field for 2D settings
@@ -179,6 +185,7 @@ public:
   void setParticleSize(const uint8_t size);
   void setGravity(const int8_t force = 8);
   void enableParticleCollisions(const bool enable, const uint8_t hardness = 255);
+  void setBlobRendering(const uint8_t threshold); // enable blob-rendering mode with given threshold (0 = disable)
 
   PSparticle *particles; // pointer to particle array
   PSparticleFlags *particleFlags; // pointer to particle flags array
@@ -226,6 +233,7 @@ private:
   uint8_t particlesize; // global particle size, 0 = 1 pixel, 1 = 2 pixels, 255 = 10 pixels (note: this is also added to individual sized particles, set to 0 or 1 for standard advanced particle rendering)
   uint8_t motionBlur; // motion blur, values > 100 gives smoother animations. Note: motion blurring does not work if particlesize is > 0
   uint8_t smearBlur; // 2D smeared blurring of full frame
+  uint8_t blobThreshold; // threshold for blob rendering, blob rendering is disabled if set to 0
 };
 
 // initialization functions (not part of class)
@@ -235,13 +243,8 @@ uint32_t calculateNumberOfSources2D(const uint32_t pixels, const uint32_t reques
 bool allocateParticleSystemMemory2D(const uint32_t numparticles, const uint32_t numsources, const bool advanced, const bool sizecontrol, const uint32_t additionalbytes);
 
 // distance-based brightness for ellipse rendering, returns brightness (0-255) based on distance from ellipse center
-inline uint8_t calculateEllipseBrightness(int32_t dx, int32_t dy, int32_t rxsq, int32_t rysq, uint8_t maxBrightness) {
-  // square the distances
-  uint32_t dx_sq = dx * dx;
-  uint32_t dy_sq = dy * dy;
-
+inline uint8_t calculateEllipseBrightness(int32_t dx_sq, int32_t dy_sq, int32_t rxsq, int32_t rysq, uint8_t maxBrightness) {
   uint32_t dist_sq = ((dx_sq << 8) / rxsq) + ((dy_sq << 8) / rysq); // normalized squared distance in fixed point: (dx²/rx²) * 256 + (dy²/ry²) * 256
-
   if (dist_sq >= 256) return 0;  // pixel is outside the ellipse, unit radius in fixed point: 256 = 1.0
   //if (dist_sq <= 96) return maxBrightness; // core at full brightness
   int32_t falloff = 256 - dist_sq;

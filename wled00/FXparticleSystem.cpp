@@ -171,9 +171,16 @@ void ParticleSystem2D::setGravity(int8_t force) {
   }
 }
 
-void ParticleSystem2D::enableParticleCollisions(bool enable, uint8_t hardness) { // enable/disable gravity, optionally, set the force (force=8 is default) can be 1-255, 0 is also disable
+// enable/disable gravity, optionally, set the force (force=8 is default) can be 1-255, 0 is also disable
+void ParticleSystem2D::enableParticleCollisions(bool enable, uint8_t hardness) {
   particlesettings.useCollisions = enable;
   collisionHardness = (int)hardness + 1;
+}
+
+// enable/disable blob-rendering mode with given threshold (0 = disable)
+// note: set threshold above the minimum added weightscale for good results, see renderLargeParticle() for details
+void ParticleSystem2D::setBlobRendering(const uint8_t threshold) {
+  blobThreshold = threshold;
 }
 
 // emit one particle with variation, returns index of emitted particle (or -1 if no particle emitted)
@@ -611,6 +618,51 @@ void ParticleSystem2D::render() {
     renderParticle(i, brightness, baseRGB, particlesettings.wrapX, particlesettings.wrapY);
   }
 
+  // blob rendering: uses "meta ball" rendering with a threshold, color and weight is accumulated in renderLargeParticle()
+  if (blobThreshold) {
+    // Normalize and apply narrow edge falloff
+    for (int y = 0; y <= maxYpixel; y++) {
+      const int row_offset = (maxYpixel - y) * (maxXpixel + 1); // flip y coordinate (0,0 is bottom left in PS but top left in framebuffer)
+
+      for (int x = 0; x <= maxXpixel; x++) {
+        const uint32_t idx = x + row_offset;
+        CRGBW color = framebuffer[idx];
+        uint8_t w = color.w; // accumulated weights are stored in white channel
+        if (w <= 1 + blobThreshold) { // +1 to avoid division by zero
+          framebuffer[idx] = BLACK; // below threshold: black
+          continue;
+        }
+
+        uint32_t r = ((uint16_t)color.r << (BLOBCOLORSHIFT + 8)) / w; // initial color was scaled down by 2, compensate
+        uint32_t g = ((uint16_t)color.g << (BLOBCOLORSHIFT + 8)) / w;
+        uint32_t b = ((uint16_t)color.b << (BLOBCOLORSHIFT + 8)) / w;
+
+        // scale colors down, preserve color ratios
+        uint32_t max = std::max(r,g);
+        max = std::max(max + 1,b); // +1 to avoid division by zero
+        const uint32_t scale = (uint32_t(255)<<8) / max; // division of two 8bit (shifted) values does not work -> use bit shifts and multiplaction instead
+        color.r = (r * scale) >> 8;
+        color.g = (g * scale) >> 8;
+        color.b = (b * scale) >> 8;
+/*
+        color.r = (r16 > 255) ? 255 : r16;
+        color.g = (g16 > 255) ? 255 : g16;
+        color.b = (b16 > 255) ? 255 : b16;
+*/
+        // apply edge falloff to smooth blob edges
+        const uint16_t edgeband = 1 << BLOBEDGBANDSHIFT;  // brightness falloff band
+        uint16_t delta = w - blobThreshold;
+        if (delta < edgeband) {
+          uint8_t edgefade = (delta * 255) >> BLOBEDGBANDSHIFT; // 0 at threshold, 255 at threshold + edgeband
+          color = color_fade(color, edgefade ); // fade color down near edge
+        }
+        // else: full brightness, no scaling
+        color.w = 0; // clear weight channel
+        framebuffer[idx] = color;
+      }
+    }
+  }
+
   // apply 2D blur to rendered frame
   if (smearBlur) {
     SEGMENT.blur2D(smearBlur, smearBlur, true);
@@ -634,7 +686,7 @@ void WLED_O2_ATTR ParticleSystem2D::renderParticle(const uint32_t particleindex,
     return;
   }
 
-  if (size > 1) { // size > 1: render as ellipse
+  if (size > 1) { // size > 1: render as circle/ellipse or use blob rendering if enabled
     renderLargeParticle(size, particleindex, brightness, color, wrapX, wrapY); // larger size rendering
     return;
   }
@@ -752,9 +804,15 @@ void WLED_O2_ATTR ParticleSystem2D::renderLargeParticle(const uint32_t size, con
     getParticleXYsize(&advPartProps[particleindex], &advPartSize[particleindex], xsize, ysize);
   }
 
-  int32_t rx_subpixel = xsize + PS_P_RADIUS + 1; // size = 1 means radius of just over 1 pixel, + PS_P_RADIUS (+1 to accoutn for bit-shift loss)
-  int32_t ry_subpixel = ysize + PS_P_RADIUS + 1; // size = 255 is radius of 5, so add 65 -> 65+255=320, 320>>6=5 pixels
-
+  int32_t rx_subpixel, ry_subpixel;
+  if (blobThreshold) { // blob rendering mode
+    rx_subpixel = xsize << 1; // up to ~8 pixels radius
+    ry_subpixel = ysize << 1; // TODO: blob rendering does not use asymmetrical sizes, could be removed to improve speed a little
+  }
+  else {
+    rx_subpixel = xsize + PS_P_RADIUS + 1; // size = 1 means radius of just over 1 pixel, + PS_P_RADIUS (+1 to accoutn for bit-shift loss)
+    ry_subpixel = ysize + PS_P_RADIUS + 1; // size = 255 is radius of 5, so add 65 -> 65+255=320, 320>>6=5 pixels
+  }
   // rendering bounding box in pixels
   int32_t rx_pixels = (rx_subpixel >> PS_P_RADIUS_SHIFT);
   int32_t ry_pixels = (ry_subpixel >> PS_P_RADIUS_SHIFT);
@@ -772,10 +830,22 @@ void WLED_O2_ATTR ParticleSystem2D::renderLargeParticle(const uint32_t size, con
 
   // iterate over bounding box and render each pixel
   for (int32_t py = y_min; py <= y_max; py++) {
+    // Check bounds and apply wrapping
+    int32_t render_y = py;
+    if (render_y < 0) {
+      if (!wrapY) continue;
+      render_y += matrixY;
+    } else if (render_y > maxYpixel) {
+      if (!wrapY) continue;
+      render_y -= matrixY; // TODO: if matrix is small, this goes OOB, fix it (use a while loop)
+    }
+    const int row_offset = (maxYpixel - render_y) * matrixX; // flip y coordinate (0,0 is bottom left in PS but top left in framebuffer)
+    // distance from particle center in subpixel space, explanation see above
+    int32_t dy_subpixel = (py << PS_P_RADIUS_SHIFT) - y_subcenter + PS_P_HALFRADIUS;
+    uint32_t dy_sq = dy_subpixel * dy_subpixel; // square the distance
     for (int32_t px = x_min; px <= x_max; px++) {
       // Check bounds and apply wrapping
       int32_t render_x = px;
-      int32_t render_y = py;
       if (render_x < 0) {
         if (!wrapX) continue;
         render_x += matrixX;
@@ -784,31 +854,43 @@ void WLED_O2_ATTR ParticleSystem2D::renderLargeParticle(const uint32_t size, con
         render_x -= matrixX;
       }
 
-      if (render_y < 0) {
-        if (!wrapY) continue;
-        render_y += matrixY;
-      } else if (render_y > maxYpixel) {
-        if (!wrapY) continue;
-        render_y -= matrixY;
-      }
-
       // distance from particle center, explanation see above
       int32_t dx_subpixel = (px << PS_P_RADIUS_SHIFT) - x_subcenter + PS_P_HALFRADIUS;
-      int32_t dy_subpixel = (py << PS_P_RADIUS_SHIFT) - y_subcenter + PS_P_HALFRADIUS;
+      uint32_t dx_sq = dx_subpixel * dx_subpixel; // square the distances
+      uint8_t pixel_brightness;
+      uint32_t idx = render_x + row_offset; // flip y coordinate (0,0 is bottom left in PS but top left in framebuffer)
 
-      // calculate brightness based on squared distance to ellipse center
-      uint8_t pixel_brightness = calculateEllipseBrightness(dx_subpixel, dy_subpixel, rx_sq, ry_sq, brightness);
+      // meta-ball blob rendering: each particle adds color and "weight" to pixels within radius, a threshold & scaling is applied in final rendering pass in render()
+      // weight is based on squared distance to particle center with linear fall-off to radius
+      if (blobThreshold) {
+        const int32_t dist_sq = dx_sq + dy_sq; // squared distance in subpixels
+        const int32_t delta = (int32_t)rx_sq - dist_sq; // radius is 8 max, radiusSub is 8*64 max TODO: check if larger than 8 makes sense (probably not, its very slow)
+        if (delta < int32_t(rx_sq >> BLOBWEIGHTSHIFT)) continue; // weight would be zero: pixel lies outside of influence radius
+        uint32_t w = ((delta << BLOBWEIGHTSHIFT) / rx_sq);  // weight scaled to 0-32
+        CRGBW buffercolor = framebuffer[idx]; // r,g,b are used to accumulate color values, w is used to accumulate weight
+        buffercolor.w = (uint16_t)buffercolor.w + w > 255 ? 255 : buffercolor.w + w; // accumulate weight in white channel, max 255
 
-      if (pixel_brightness == 0) continue; // skip black pixels
-
-      // apply inverse gamma correction if needed, if this is skipped, particles flicker due to changing total brightness
-      if (gammaCorrectCol) {
-        pixel_brightness = gamma8inv(pixel_brightness); // invert brigthess so brightness distribution is linear after gamma correction
+        // Accumulate color * weight into framebuffer, downscale colors to prevent saturation (is scaled back in final rendering pass)
+        uint16_t new_r = buffercolor.r + ((color.r * w) >> (8 + BLOBCOLORSHIFT)); // shift by 8 for weight, +COLORSHIFT to avoid immediate saturation if multiple particles overlap
+        uint16_t new_g = buffercolor.g + ((color.g * w) >> (8 + BLOBCOLORSHIFT));
+        uint16_t new_b = buffercolor.b + ((color.b * w) >> (8 + BLOBCOLORSHIFT));
+        // clamp
+        buffercolor.r = (new_r > 255) ? 255 : new_r;
+        buffercolor.g = (new_g > 255) ? 255 : new_g;
+        buffercolor.b = (new_b > 255) ? 255 : new_b;
+        framebuffer[idx] = buffercolor; // write back (note: byte access directly to framebuffer is not allowed on ESP32 as it can be a 32bit access only buffer)
       }
-
-      // Render pixel
-      uint32_t idx = render_x + (maxYpixel - render_y) * matrixX; // flip y coordinate (0,0 is bottom left in PS but top left in framebuffer)
-      framebuffer[idx] = fast_color_scaleAdd(framebuffer[idx], color, pixel_brightness);
+      else {
+        // calculate brightness based on squared distance to ellipse center
+        pixel_brightness = calculateEllipseBrightness(dx_sq, dy_sq, rx_sq, ry_sq, brightness);
+        if (pixel_brightness == 0) continue; // skip black pixels
+        // apply inverse gamma correction if needed, if this is skipped, particles flicker due to changing total brightness
+        if (gammaCorrectCol) {
+          pixel_brightness = gamma8inv(pixel_brightness); // invert brigthess so brightness distribution is linear after gamma correction
+        }
+        // Render pixel
+        framebuffer[idx] = fast_color_scaleAdd(framebuffer[idx], color, pixel_brightness);
+      }
     }
   }
 }
