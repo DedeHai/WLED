@@ -357,6 +357,101 @@ void handleButton()
     lastAnalogRead = now;
   }
 }
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+#include "driver/dedic_gpio.h"
+#endif
+
+// handleOnOff() is called from handleIO() before strip.service()
+void handleOnOff(bool forceOff)
+{
+  if (strip.getBrightness()) {
+    lastOnTime = millis();
+    if (offMode) {
+      BusManager::on();
+      if (rlyPin>=0) {
+        // note: pinMode is set in first call to handleOnOff(true) in beginStrip()
+        // pulse the relay pin fast for a "soft on" to avoid white flash (experimental)
+        // pulse length: ESP32/S3/S2 ~50ns, C3 ~700ns, ESP8266: 70ns
+
+        #if defined(CONFIG_IDF_TARGET_ESP32C3)
+        // note: using GPIO bundle cuts down pulse lenth from 700ns to 400ns, still pretty slow compared to other esp32 variants
+        dedic_gpio_bundle_handle_t rly_bundle = NULL;
+        int gpio_pins[] = { rlyPin };
+
+        dedic_gpio_bundle_config_t bundle_config = {
+            .gpio_array = gpio_pins,
+            .array_size = 1, // Only one pin in this bundle
+            .flags = {
+                .out_en = 1, // Enable as output
+            },
+        };
+        dedic_gpio_new_bundle(&bundle_config, &rly_bundle);
+        #endif
+        uint32_t mask = (1U << rlyPin);
+        int pulses = 50; // number of pulses
+
+        do {
+          #if defined(ESP8266)
+          if (rlyMde) {
+            GPOS = mask;  // set high
+            GPOC = mask;  // set low
+          }
+          else {
+            GPOC = mask;  // set low
+            GPOS = mask;  // set high
+          }
+          #elif defined(CONFIG_IDF_TARGET_ESP32C3)
+          if (rlyMde) {
+            //GPIO.out_w1ts.out_w1ts = mask; // set high ~700ns
+            //GPIO.out_w1tc.out_w1tc = mask; // set low
+            dedic_gpio_bundle_write(rly_bundle, 0x01, 0x01); // set high ~400ns
+            dedic_gpio_bundle_write(rly_bundle, 0x01, 0x00); // set low
+          }
+          else {
+          //  GPIO.out_w1tc.out_w1tc = mask; // set low
+          //  GPIO.out_w1ts.out_w1ts = mask; // set high
+            dedic_gpio_bundle_write(rly_bundle, 0x01, 0x00); // set low
+            dedic_gpio_bundle_write(rly_bundle, 0x01, 0x01); // set high
+          }
+          #else
+          volatile uint32_t* outSet = (rlyPin < 32) ? &GPIO.out_w1ts : &GPIO.out1_w1ts.val;
+          volatile uint32_t* outClr = (rlyPin < 32) ? &GPIO.out_w1tc : &GPIO.out1_w1tc.val;
+
+          if (rlyMde) {
+            *outSet = mask; // set high
+            *outClr = mask; // set low
+          }
+          else {
+            *outClr = mask; // set low
+            *outSet = mask; // set high
+          }
+          #endif
+          delayMicroseconds(20); // short delay to make this a very low duty cycle pulse
+          delay(0); // yield to other tasks
+        } while (pulses--);
+
+        #if defined(CONFIG_IDF_TARGET_ESP32C3)
+        // deallcoate the bundle after use and make it a normal GPIO again
+        dedic_gpio_del_bundle(rly_bundle);
+        gpio_reset_pin((gpio_num_t)rlyPin);
+        pinMode(rlyPin, rlyOpenDrain ? OUTPUT_OPEN_DRAIN : OUTPUT);
+        #endif
+        digitalWrite(rlyPin, rlyMde); // set to on state
+      }
+      offMode = false;
+    }
+  } else if (millis() - lastOnTime > 600 && !strip.needsUpdate() || forceOff) {
+    // for turning LED or relay off we need to wait until strip no longer needs updates (strip.trigger())
+    if (!offMode) {
+      BusManager::off();
+      if (rlyPin>=0) {
+        digitalWrite(rlyPin, !rlyMde);
+        pinMode(rlyPin, rlyOpenDrain ? OUTPUT_OPEN_DRAIN : OUTPUT);
+      }
+      offMode = true;
+    }
+  }
+}
 
 // handleIO() happens *after* handleTransitions() (see wled.cpp) which may change bri/briT but *before* strip.service()
 // where actual LED painting occurrs
@@ -367,28 +462,7 @@ void handleIO()
 
   // if we want to control on-board LED (ESP8266) or relay we have to do it here as the final show() may not happen until
   // next loop() cycle
-  if (strip.getBrightness()) {
-    lastOnTime = millis();
-    if (offMode) {
-      BusManager::on();
-      if (rlyPin>=0) {
-        pinMode(rlyPin, rlyOpenDrain ? OUTPUT_OPEN_DRAIN : OUTPUT);
-        digitalWrite(rlyPin, rlyMde);
-        delay(50); // wait for relay to switch and power to stabilize
-      }
-      offMode = false;
-    }
-  } else if (millis() - lastOnTime > 600 && !strip.needsUpdate()) {
-    // for turning LED or relay off we need to wait until strip no longer needs updates (strip.trigger())
-    if (!offMode) {
-      BusManager::off();
-      if (rlyPin>=0) {
-        pinMode(rlyPin, rlyOpenDrain ? OUTPUT_OPEN_DRAIN : OUTPUT);
-        digitalWrite(rlyPin, !rlyMde);
-      }
-      offMode = true;
-    }
-  }
+  handleOnOff();
 }
 
 void IRAM_ATTR touchButtonISR()
