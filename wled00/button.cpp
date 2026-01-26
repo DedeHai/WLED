@@ -359,10 +359,22 @@ void handleButton()
 }
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
 #include "driver/dedic_gpio.h"
+IRAM_ATTR void pulseRelayPin(dedic_gpio_bundle_handle_t rly_bundle)
+{
+    if (rlyMde) {
+    dedic_gpio_bundle_write(rly_bundle, 0x01, 0x01); // set high ~400ns
+    dedic_gpio_bundle_write(rly_bundle, 0x01, 0x00); // set low
+  }
+  else {
+    dedic_gpio_bundle_write(rly_bundle, 0x01, 0x00); // set low
+    dedic_gpio_bundle_write(rly_bundle, 0x01, 0x01); // set high
+  }
+}
+
 #endif
 
 // handleOnOff() is called from handleIO() before strip.service()
-void handleOnOff(bool forceOff)
+IRAM_ATTR void handleOnOff(bool forceOff)
 {
   if (strip.getBrightness()) {
     lastOnTime = millis();
@@ -374,7 +386,7 @@ void handleOnOff(bool forceOff)
         // pulse length: ESP32/S3/S2 ~50ns, C3 ~700ns, ESP8266: 70ns
 
         #if defined(CONFIG_IDF_TARGET_ESP32C3)
-        // note: using GPIO bundle cuts down pulse lenth from 700ns to 400ns, still pretty slow compared to other esp32 variants
+        // note: using GPIO bundle cuts down pulse lenth from 700ns to 400ns and about 120ns using an IRAM_ATTR function
         dedic_gpio_bundle_handle_t rly_bundle = NULL;
         int gpio_pins[] = { rlyPin };
 
@@ -388,7 +400,7 @@ void handleOnOff(bool forceOff)
         dedic_gpio_new_bundle(&bundle_config, &rly_bundle);
         #endif
         uint32_t mask = (1U << rlyPin);
-        int pulses = 50; // number of pulses
+        int pulses = 100; // number of pulses
 
         do {
           #if defined(ESP8266)
@@ -401,18 +413,7 @@ void handleOnOff(bool forceOff)
             GPOS = mask;  // set high
           }
           #elif defined(CONFIG_IDF_TARGET_ESP32C3)
-          if (rlyMde) {
-            //GPIO.out_w1ts.out_w1ts = mask; // set high ~700ns
-            //GPIO.out_w1tc.out_w1tc = mask; // set low
-            dedic_gpio_bundle_write(rly_bundle, 0x01, 0x01); // set high ~400ns
-            dedic_gpio_bundle_write(rly_bundle, 0x01, 0x00); // set low
-          }
-          else {
-          //  GPIO.out_w1tc.out_w1tc = mask; // set low
-          //  GPIO.out_w1ts.out_w1ts = mask; // set high
-            dedic_gpio_bundle_write(rly_bundle, 0x01, 0x00); // set low
-            dedic_gpio_bundle_write(rly_bundle, 0x01, 0x01); // set high
-          }
+          pulseRelayPin(rly_bundle); // pulse must be an IRAM_ATTR function to achieve the best timing (brings it down from 400ns to 100ns)
           #else
           volatile uint32_t* outSet = (rlyPin < 32) ? &GPIO.out_w1ts : &GPIO.out1_w1ts.val;
           volatile uint32_t* outClr = (rlyPin < 32) ? &GPIO.out_w1tc : &GPIO.out1_w1tc.val;
@@ -426,7 +427,7 @@ void handleOnOff(bool forceOff)
             *outSet = mask; // set high
           }
           #endif
-          delayMicroseconds(20); // short delay to make this a very low duty cycle pulse
+          delayMicroseconds(50); // short delay to make this a very low duty cycle pulse
           delay(0); // yield to other tasks
         } while (pulses--);
 
