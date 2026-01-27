@@ -929,6 +929,7 @@ class WS2812FX {
     bool hasRGBWBus() const;
     bool hasCCTBus() const;
     bool deserializeMap(unsigned n = 0);
+    size_t parseLedmap(const char* fileName, void* table, size_t maxSize, bool is8bit);
 
     inline bool isUpdating() const           { return !BusManager::canAllShow(); } // return true if the strip is being sent pixel updates
     inline bool isServicing() const          { return _isServicing; }           // returns true if strip.service() is executing

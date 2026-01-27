@@ -2007,35 +2007,15 @@ bool WS2812FX::deserializeMap(unsigned n) {
     isMatrix = true;
     DEBUG_PRINTF_P(PSTR("LED map width=%d, height=%d\n"), Segment::maxWidth, Segment::maxHeight);
   }
+  releaseJSONBufferLock();
 
   d_free(customMappingTable);
   customMappingTable = static_cast<uint16_t*>(d_malloc(sizeof(uint16_t)*getLengthTotal())); // prefer DRAM for speed
 
   if (customMappingTable) {
     DEBUG_PRINTF_P(PSTR("ledmap allocated: %uB\n"), sizeof(uint16_t)*getLengthTotal());
-    File f = WLED_FS.open(fileName, "r");
-    f.find("\"map\":[");
-    while (f.available()) { // f.position() < f.size() - 1
-      char number[32];
-      size_t numRead = f.readBytesUntil(',', number, sizeof(number)-1); // read a single number (may include array terminating "]" but not number separator ',')
-      number[numRead] = 0;
-      if (numRead > 0) {
-        char *end = strchr(number,']'); // we encountered end of array so stop processing if no digit found
-        bool foundDigit = (end == nullptr);
-        int i = 0;
-        if (end != nullptr) do {
-          if (number[i] >= '0' && number[i] <= '9') foundDigit = true;
-          if (foundDigit || &number[i++] == end) break;
-        } while (i < 32);
-        if (!foundDigit) break;
-        int index = atoi(number);
-        if (index < 0 || index > 65535) index = 0xFFFF; // prevent integer wrap around
-        customMappingTable[customMappingSize++] = index;
-        if (customMappingSize >= getLengthTotal()) break;
-      } else break; // there was nothing to read, stop
-    }
-    currentLedmap = n;
-    f.close();
+    customMappingSize = parseLedmap(fileName, customMappingTable, getLengthTotal(), false);
+    if (customMappingSize > 0) currentLedmap = n;
 
     #ifdef WLED_DEBUG
     DEBUG_PRINT(F("Loaded ledmap:"));
@@ -2057,9 +2037,39 @@ bool WS2812FX::deserializeMap(unsigned n) {
     DEBUG_PRINTLN(F("ERROR LED map allocation error."));
   }
 
-  releaseJSONBufferLock();
   return (customMappingSize > 0);
 }
+
+size_t WS2812FX::parseLedmap(const char* fileName, void* table, size_t maxSize, bool is8bit) {
+  if (!WLED_FS.exists(fileName)) return 0;
+  File f = WLED_FS.open(fileName, "r");
+  if (!f) return 0;
+  f.find("\"map\":[");
+  size_t count = 0;
+  while (f.available() && count < maxSize) {
+    char number[16];
+    size_t numRead = f.readBytesUntil(',', number, sizeof(number)-1);
+    number[numRead] = 0;
+    if (numRead > 0) {
+      char *end = strchr(number,']');
+      bool foundDigit = false;
+      for (size_t i=0; i<numRead; i++) {
+        if ((number[i] >= '0' && number[i] <= '9') || number[i] == '-') { foundDigit = true; break; }
+      }
+      if (!foundDigit) break;
+      int val = atoi(number);
+      if (is8bit) {
+        ((int8_t*)table)[count++] = (int8_t)constrain(val, -1, 1);
+      } else {
+        ((uint16_t*)table)[count++] = (uint16_t)(val < 0 ? 0xFFFFU : val);
+      }
+      if (end) break;
+    } else break;
+  }
+  f.close();
+  return count;
+}
+
 
 
 const char JSON_mode_names[] PROGMEM = R"=====(["FX names moved"])=====";
