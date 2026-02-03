@@ -9,6 +9,7 @@
 #include "src/dependencies/network/Network.h" // for isConnected() (& WiFi)
 #include "driver/ledc.h"
 #include "soc/ledc_struct.h"
+
   #if !(defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3))
     #define LEDC_MUTEX_LOCK()    do {} while (xSemaphoreTake(_ledc_sys_lock, portMAX_DELAY) != pdPASS)
     #define LEDC_MUTEX_UNLOCK()  xSemaphoreGive(_ledc_sys_lock)
@@ -24,6 +25,10 @@
 #include "bus_manager.h"
 #include "bus_wrapper.h"
 #include "wled.h"
+
+#ifdef HAS_MCPWM
+  #include "driver/mcpwm.h"
+#endif
 
 extern char cmDNS[];
 extern bool cctICused;
@@ -409,15 +414,25 @@ BusPwm::BusPwm(const BusConfig &bc)
     analogWriteRange((1<<_depth)-1);
     analogWriteFreq(_frequency);
     #else
+    _useMcpwm = false;
+    _mcpwmHandle = 255;
     // for 2 pin PWM CCT strip pinManager will make sure both LEDC channels are in the same speed group and sharing the same timer
-    _ledcStart = PinManager::allocateLedc(numPins);
+    _ledcStart = 255; //!!! test mcpwm  // PinManager::allocateLedc(numPins);
     if (_ledcStart == 255) { //no more free LEDC channels
-      PinManager::deallocateMultiplePins(pins, numPins, PinOwner::BusPwm);
-      DEBUGBUS_PRINTLN(F("No more free LEDC channels!"));
-      return;
+      // Try MCPWM as fallback
+      _mcpwmHandle = PinManager::allocateMcpwm(numPins);
+      if (_mcpwmHandle == 255) {
+        PinManager::deallocateMultiplePins(pins, numPins, PinOwner::BusPwm);
+        DEBUGBUS_PRINTLN(F("No more free LEDC or MCPWM channels!"));
+        return;
+      }
+      _useMcpwm = true;
+      _depth = 12; // MCPWM: use 12-bit resolution without dithering
+      DEBUGBUS_PRINTLN(F("Using MCPWM fallback for PWM bus"));
+    } else {
+      // if _needsRefresh is true (UI hack) we are using dithering (credit @dedehai & @zalatnaicsongor)
+      if (dithering) _depth = 12; // fixed 8 bit depth PWM with 4 bit dithering (ESP8266 has no hardware to support dithering)
     }
-    // if _needsRefresh is true (UI hack) we are using dithering (credit @dedehai & @zalatnaicsongor)
-    if (dithering) _depth = 12; // fixed 8 bit depth PWM with 4 bit dithering (ESP8266 has no hardware to support dithering)
     #endif
 
     for (unsigned i = 0; i < numPins; i++) {
@@ -425,12 +440,27 @@ BusPwm::BusPwm(const BusConfig &bc)
       #ifdef ESP8266
       pinMode(_pins[i], OUTPUT);
       #else
-      unsigned channel = _ledcStart + i;
-      ledcSetup(channel, _frequency, _depth - (dithering*4)); // with dithering _frequency doesn't really matter as resolution is 8 bit
-      ledcAttachPin(_pins[i], channel);
-      // LEDC timer reset credit @dedehai
-      uint8_t group = (channel / 8), timer = ((channel / 2) % 4); // same fromula as in ledcSetup()
-      ledc_timer_rst((ledc_mode_t)group, (ledc_timer_t)timer); // reset timer so all timers are almost in sync (for phase shift)
+      if (_useMcpwm) {
+#ifdef HAS_MCPWM
+        // MCPWM initialization
+        byte unit = _mcpwmHandle & 0x03;
+        byte op = (_mcpwmHandle >> 2) & 0x07;
+       
+        // Initialize MCPWM unit if not already done
+        mcpwm_gpio_init((mcpwm_unit_t)unit, (i == 0) ? MCPWM0A : MCPWM0B, _pins[i]);
+        
+        // Configure MCPWM (will be done once per operator in show())
+        pinMode(_pins[i], OUTPUT);
+#endif
+      } else {
+        // LEDC initialization
+        unsigned channel = _ledcStart + i;
+        ledcSetup(channel, _frequency, _depth - (dithering*4)); // with dithering _frequency doesn't really matter as resolution is 8 bit
+        ledcAttachPin(_pins[i], channel);
+        // LEDC timer reset credit @dedehai
+        uint8_t group = (channel / 8), timer = ((channel / 2) % 4); // same fromula as in ledcSetup()
+        ledc_timer_rst((ledc_mode_t)group, (ledc_timer_t)timer); // reset timer so all timers are almost in sync (for phase shift)
+      }
       #endif
     }
     _hasRgb = hasRGB(bc.type);
@@ -438,7 +468,13 @@ BusPwm::BusPwm(const BusConfig &bc)
     _hasCCT = hasCCT(bc.type);
     _valid = true;
   }
-  DEBUGBUS_PRINTF_P(PSTR("%successfully inited PWM strip with type %u, frequency %u, bit depth %u and pins %u,%u,%u,%u,%u\n"), _valid?"S":"Uns", bc.type, _frequency, _depth, _pins[0], _pins[1], _pins[2], _pins[3], _pins[4]);
+  DEBUGBUS_PRINTF_P(PSTR("%successfully inited PWM strip with type %u, frequency %u, bit depth %u and pins %u,%u,%u,%u,%u%s\n"), _valid?"S":"Uns", bc.type, _frequency, _depth, _pins[0], _pins[1], _pins[2], _pins[3], _pins[4], 
+    #ifdef ARDUINO_ARCH_ESP32
+    _useMcpwm ? " (MCPWM)" : ""
+    #else
+    ""
+    #endif
+  );
 }
 
 void BusPwm::setPixelColor(unsigned pix, uint32_t c) {
@@ -548,14 +584,41 @@ void BusPwm::show() {
     //stopWaveform(_pins[i]);  // can cause the waveform to miss a cycle. instead we risk crossovers.
     startWaveformClockCycles(_pins[i], duty, analogPeriod - duty, 0, i ? _pins[0] : -1, hPoint, false);
     #else
-    unsigned channel = _ledcStart + i;
-    unsigned gr = channel/8;  // high/low speed group
-    unsigned ch = channel%8;  // group channel
-    // directly write to LEDC struct as there is no HAL exposed function for dithering
-    // duty has 20 bit resolution with 4 fractional bits (24 bits in total)
-    LEDC.channel_group[gr].channel[ch].duty.duty = duty << ((!dithering)*4);  // lowest 4 bits are used for dithering, shift by 4 bits if not using dithering
-    LEDC.channel_group[gr].channel[ch].hpoint.hpoint = hPoint >> bitShift;    // hPoint is at _depth resolution (needs shifting if dithering)
-    ledc_update_duty((ledc_mode_t)gr, (ledc_channel_t)ch);
+    if (_useMcpwm) {
+#ifdef HAS_MCPWM
+      // MCPWM output path (no dithering support)
+      byte unit = _mcpwmHandle & 0x03;
+      byte op = (_mcpwmHandle >> 2) & 0x07;
+      mcpwm_unit_t mcpwmUnit = (mcpwm_unit_t)unit;
+      mcpwm_operator_t mcpwmOp = (mcpwm_operator_t)op;
+      
+      // Initialize timer on first pin
+      if (i == 0) {
+        mcpwm_config_t pwm_config;
+        pwm_config.frequency = _frequency;
+        pwm_config.cmpr_a = 0;
+        pwm_config.cmpr_b = 0;
+        pwm_config.duty_mode = MCPWM_DUTY_MODE_0;
+        pwm_config.counter_mode = MCPWM_UP_COUNTER;
+        mcpwm_init(mcpwmUnit, (mcpwm_timer_t)op, &pwm_config);
+      }
+      
+      // Set duty cycle (convert to percentage for MCPWM API)
+      float dutyPercent = (duty * 100.0f) / maxBri;
+      mcpwm_set_duty(mcpwmUnit, (mcpwm_timer_t)op, (i == 0) ? MCPWM_OPR_A : MCPWM_OPR_B, dutyPercent);
+      mcpwm_set_duty_type(mcpwmUnit, (mcpwm_timer_t)op, (i == 0) ? MCPWM_OPR_A : MCPWM_OPR_B, MCPWM_DUTY_MODE_0);
+#endif
+    } else {
+      // LEDC output path
+      unsigned channel = _ledcStart + i;
+      unsigned gr = channel/8;  // high/low speed group
+      unsigned ch = channel%8;  // group channel
+      // directly write to LEDC struct as there is no HAL exposed function for dithering
+      // duty has 20 bit resolution with 4 fractional bits (24 bits in total)
+      LEDC.channel_group[gr].channel[ch].duty.duty = duty << ((!dithering)*4);  // lowest 4 bits are used for dithering, shift by 4 bits if not using dithering
+      LEDC.channel_group[gr].channel[ch].hpoint.hpoint = hPoint >> bitShift;    // hPoint is at _depth resolution (needs shifting if dithering)
+      ledc_update_duty((ledc_mode_t)gr, (ledc_channel_t)ch);
+    }
     #endif
 
     if (!_reversed) hPoint += duty;
@@ -591,11 +654,24 @@ void BusPwm::deallocatePins() {
     #ifdef ESP8266
     digitalWrite(_pins[i], LOW); //turn off PWM interrupt
     #else
-    if (_ledcStart < WLED_MAX_ANALOG_CHANNELS) ledcDetachPin(_pins[i]);
+    if (_useMcpwm) {
+#ifdef HAS_MCPWM
+      // Stop MCPWM output
+      byte unit = _mcpwmHandle & 0x03;
+      byte op = (_mcpwmHandle >> 2) & 0x07;
+      mcpwm_stop((mcpwm_unit_t)unit, (mcpwm_timer_t)op);
+#endif
+    } else {
+      if (_ledcStart < WLED_MAX_ANALOG_CHANNELS) ledcDetachPin(_pins[i]);
+    }
     #endif
   }
   #ifdef ARDUINO_ARCH_ESP32
-  PinManager::deallocateLedc(_ledcStart, numPins);
+  if (_useMcpwm) {
+    PinManager::deallocateMcpwm(_mcpwmHandle, numPins);
+  } else {
+    PinManager::deallocateLedc(_ledcStart, numPins);
+  }
   #endif
 }
 

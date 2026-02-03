@@ -10,6 +10,11 @@
 #define WLED_NUM_PINS (GPIO_PIN_COUNT)
 #endif
 
+// MCPWM (motor control hardware) is only available on ESP32 and ESP32-S3 (not S2, C3, etc.)
+#if !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(CONFIG_IDF_TARGET_ESP32C3)
+  #define HAS_MCPWM
+#endif
+
 typedef struct PinManagerPinType {
   int8_t pin;
   bool   isOutput;
@@ -106,6 +111,10 @@ namespace PinManager {
   #ifdef ARDUINO_ARCH_ESP32
   byte allocateLedc(byte channels);
   void deallocateLedc(byte pos, byte channels);
+  // MCPWM allocation for PWM fallback when LEDC is exhausted
+  // Returns unit number (0-1) in bits 0-1, operator number (0-2) in bits 2-4, or 255 if allocation failed
+  byte allocateMcpwm(byte channels);
+  void deallocateMcpwm(byte mcpwmHandle, byte channels);
   #endif
 };
 

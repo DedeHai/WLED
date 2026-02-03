@@ -19,6 +19,7 @@ static uint32_t pinAlloc = 0UL;     // 1 bit per pin, we use first 17bits
 #else
 static uint64_t pinAlloc = 0ULL;     // 1 bit per pin, we use 50 bits on ESP32-S3
 static uint16_t ledcAlloc = 0;    // up to 16 LEDC channels (WLED_MAX_ANALOG_CHANNELS)
+static uint8_t mcpwmAlloc = 0;    // 2 units * 3 operators = 6 bits used (bits 0-5)
 #endif
 static uint8_t i2cAllocCount = 0; // allow multiple allocation of I2C bus pins but keep track of allocations
 static uint8_t spiAllocCount = 0; // allow multiple allocation of SPI bus pins but keep track of allocations
@@ -307,4 +308,42 @@ void PinManager::deallocateLedc(byte pos, byte channels)
     bitWrite(ledcAlloc, j, false);
   }
 }
+
+// MCPWM allocation for PWM output fallback
+// ESP32 has 2 MCPWM units, each with 3 operators, each operator can drive 2 outputs (A & B)
+// We use paired outputs, so 2 units * 3 operators = up to 6 PWM output pairs (12 channels total)
+// Returns: unit (bits 0-1) + operator (bits 2-4), or 255 if failed
+byte PinManager::allocateMcpwm(byte channels)
+{
+#ifdef HAS_MCPWM
+  if (channels == 0 || channels > 5) return 255; // max 5 channels per operator pair
+  // Simple allocation: find first free operator
+  // mcpwmAlloc uses bits 0-5 for units 0-1, operators 0-2
+  for (byte unit = 0; unit < 2; unit++) {
+    for (byte op = 0; op < 3; op++) {
+      byte bitPos = unit * 3 + op;
+      if (!bitRead(mcpwmAlloc, bitPos)) { // found free operator
+        bitWrite(mcpwmAlloc, bitPos, true);
+        return (unit & 0x03) | ((op & 0x07) << 2); // encode unit and operator
+      }
+    }
+  }
+  return 255; // no free MCPWM operators
+#else
+  return 255; // MCPWM not supported on this platform
 #endif
+}
+
+void PinManager::deallocateMcpwm(byte mcpwmHandle, byte channels)
+{
+#ifdef HAS_MCPWM
+  if (mcpwmHandle == 255) return;
+  byte unit = mcpwmHandle & 0x03;
+  byte op = (mcpwmHandle >> 2) & 0x07;
+  if (unit >= 2 || op >= 3) return; // invalid
+  byte bitPos = unit * 3 + op;
+  bitWrite(mcpwmAlloc, bitPos, false);
+#endif
+}
+#endif
+

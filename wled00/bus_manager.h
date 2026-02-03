@@ -315,6 +315,8 @@ class BusPwm : public Bus {
     uint8_t _data[OUTPUT_MAX_PINS];
     #ifdef ARDUINO_ARCH_ESP32
     uint8_t _ledcStart;
+    uint8_t _mcpwmHandle;  // MCPWM handle (unit + operator encoded), 255 = not used
+    bool _useMcpwm;        // true if using MCPWM instead of LEDC
     #endif
     uint8_t _depth;
     uint16_t _frequency;
