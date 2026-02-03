@@ -316,6 +316,7 @@ void PinManager::deallocateLedc(byte pos, byte channels)
 byte PinManager::allocateMcpwm(byte channels)
 {
 #ifdef HAS_MCPWM
+  Serial.printf("MCPWM ALLOC: requested %d channels\n", channels);
   if (channels == 0 || channels > 5) return 255; // max 5 channels per operator pair
   // Simple allocation: find first free operator
   // mcpwmAlloc uses bits 0-5 for units 0-1, operators 0-2
@@ -324,7 +325,7 @@ byte PinManager::allocateMcpwm(byte channels)
       byte bitPos = unit * 3 + op;
       if (!bitRead(mcpwmAlloc, bitPos)) { // found free operator
         bitWrite(mcpwmAlloc, bitPos, true);
-        return (unit & 0x03) | ((op & 0x07) << 2); // encode unit and operator
+        return (unit & 0x03) | ((op & 0x07) << 2); // encode unit and operator  TODO: need a more in-depth allocation check if channels > 1
       }
     }
   }

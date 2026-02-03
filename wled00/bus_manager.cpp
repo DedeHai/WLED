@@ -409,7 +409,9 @@ BusPwm::BusPwm(const BusConfig &bc)
 
   managed_pin_type pins[numPins];
   for (unsigned i = 0; i < numPins; i++) pins[i] = {(int8_t)bc.pins[i], true};
+  Serial.printf("BusPwm: numPins=%d, _frequency=%d, _depth=%d\n", numPins, _frequency, _depth); 
   if (PinManager::allocateMultiplePins(pins, numPins, PinOwner::BusPwm)) {
+    Serial.printf("BusPwm: pins allocated\n");  
     #ifdef ESP8266
     analogWriteRange((1<<_depth)-1);
     analogWriteFreq(_frequency);
@@ -428,7 +430,9 @@ BusPwm::BusPwm(const BusConfig &bc)
       }
       _useMcpwm = true;
       _depth = 12; // MCPWM: use 12-bit resolution without dithering
-      DEBUGBUS_PRINTLN(F("Using MCPWM fallback for PWM bus"));
+      byte unit = _mcpwmHandle & 0x03;
+      byte op = (_mcpwmHandle >> 2) & 0x07;
+      DEBUGBUS_PRINTF("Using MCPWM fallback: unit=%d, operator=%d, handle=0x%02X\n", unit, op, _mcpwmHandle);
     } else {
       // if _needsRefresh is true (UI hack) we are using dithering (credit @dedehai & @zalatnaicsongor)
       if (dithering) _depth = 12; // fixed 8 bit depth PWM with 4 bit dithering (ESP8266 has no hardware to support dithering)
@@ -446,11 +450,28 @@ BusPwm::BusPwm(const BusConfig &bc)
         byte unit = _mcpwmHandle & 0x03;
         byte op = (_mcpwmHandle >> 2) & 0x07;
        
-        // Initialize MCPWM unit if not already done
-        mcpwm_gpio_init((mcpwm_unit_t)unit, (i == 0) ? MCPWM0A : MCPWM0B, _pins[i]);
+        // Map operator to the correct IO signals
+        mcpwm_io_signals_t ioSignalA, ioSignalB;
+        switch(op) {
+          case 0: ioSignalA = MCPWM0A; ioSignalB = MCPWM0B; break;
+          case 1: ioSignalA = MCPWM1A; ioSignalB = MCPWM1B; break;
+          case 2: ioSignalA = MCPWM2A; ioSignalB = MCPWM2B; break;
+          default: ioSignalA = MCPWM0A; ioSignalB = MCPWM0B; break;
+        }
+        Serial.printf("MCPWM: Config unit %d, op %d, freq %d, depth %d\n", unit, op, _frequency, _depth);
+        // Initialize MCPWM GPIO
+        mcpwm_gpio_init((mcpwm_unit_t)unit, (i == 0) ? ioSignalA : ioSignalB, _pins[i]);
+        DEBUGBUS_PRINTF("MCPWM: Init pin %d as unit %d, op %d, signal %s\n", 
+          _pins[i], unit, op, (i == 0) ? "A" : "B");
         
-        // Configure MCPWM (will be done once per operator in show())
         pinMode(_pins[i], OUTPUT);
+
+        // TODO: this is wildly unfinished AI slop. need to init the MCPWM properly, that requires timer init and also handling of setting the duty cycle in setPixelColor()
+        // there is a simple example here: https://github.com/espressif/esp-idf/blob/master/examples/peripherals/mcpwm/mcpwm_servo_control/main/mcpwm_servo_control_example_main.c
+        
+
+
+
 #endif
       } else {
         // LEDC initialization
@@ -590,23 +611,32 @@ void BusPwm::show() {
       byte unit = _mcpwmHandle & 0x03;
       byte op = (_mcpwmHandle >> 2) & 0x07;
       mcpwm_unit_t mcpwmUnit = (mcpwm_unit_t)unit;
-      mcpwm_operator_t mcpwmOp = (mcpwm_operator_t)op;
+      mcpwm_timer_t mcpwmTimer = (mcpwm_timer_t)op;
       
-      // Initialize timer on first pin
-      if (i == 0) {
+      // Initialize timer only once (on first call to show(), not on every pin)
+      static bool timerInited[2][3] = {{false}}; // Track init state for each unit/timer
+      if (!timerInited[unit][op]) {
         mcpwm_config_t pwm_config;
         pwm_config.frequency = _frequency;
         pwm_config.cmpr_a = 0;
         pwm_config.cmpr_b = 0;
         pwm_config.duty_mode = MCPWM_DUTY_MODE_0;
         pwm_config.counter_mode = MCPWM_UP_COUNTER;
-        mcpwm_init(mcpwmUnit, (mcpwm_timer_t)op, &pwm_config);
+        esp_err_t err = mcpwm_init(mcpwmUnit, mcpwmTimer, &pwm_config);
+        timerInited[unit][op] = true;
+        DEBUGBUS_PRINTF("MCPWM: Initialized unit %d timer %d at %d Hz, err=%d\n", 
+          unit, op, _frequency, err);
       }
       
       // Set duty cycle (convert to percentage for MCPWM API)
       float dutyPercent = (duty * 100.0f) / maxBri;
-      mcpwm_set_duty(mcpwmUnit, (mcpwm_timer_t)op, (i == 0) ? MCPWM_OPR_A : MCPWM_OPR_B, dutyPercent);
-      mcpwm_set_duty_type(mcpwmUnit, (mcpwm_timer_t)op, (i == 0) ? MCPWM_OPR_A : MCPWM_OPR_B, MCPWM_DUTY_MODE_0);
+      mcpwm_generator_t generator = (i == 0) ? MCPWM_OPR_A : MCPWM_OPR_B;
+      
+      esp_err_t err = mcpwm_set_duty(mcpwmUnit, mcpwmTimer, generator, dutyPercent);
+      mcpwm_set_duty_type(mcpwmUnit, mcpwmTimer, generator, MCPWM_DUTY_MODE_0);
+      
+      DEBUGBUS_PRINTF("MCPWM: Pin %d (ch %d) duty=%u/%u (%.1f%%) err=%d\n", 
+        _pins[i], i, duty, maxBri, dutyPercent, err);
 #endif
     } else {
       // LEDC output path
