@@ -15,13 +15,16 @@
  * It uses NodeJS packages to inline, minify and GZIP files. See writeHtmlGzipped and writeChunks invocations at the bottom of the page.
  */
 
-const fs = require("node:fs");
+const fs = require("fs");
 const path = require("path");
 const inline = require("web-resource-inliner");
-const zlib = require("node:zlib");
+const zlib = require("zlib");
 const CleanCSS = require("clean-css");
 const minifyHtml = require("html-minifier-terser").minify;
-const packageJson = require("../package.json");
+const Terser = require("terser");
+
+const packageJson = JSON.parse(fs.readFileSync("package.json", "utf8"));
+const repoUrl = packageJson.repository ? packageJson.repository.url : "https://github.com/wled-dev/WLED";
 
 // Export functions for testing
 module.exports = { isFileNewerThan, isAnyFileInFolderNewerThan };
@@ -106,14 +109,64 @@ function adoptVersionAndRepo(html) {
   return html;
 }
 
-async function minify(str, type = "plain") {
+let nameCache = { vars: {}, props: {} };
+const reservedNames = [
+  "B", "RS", "RP", "FM", "GetV", "CN", "CS", "CG", "LC", "CH",
+  "d", "loc", "locip", "locproto", "H", "GH", "gId", "cE", "gEBCN", "gN", "isE", "isO", "isN", "isF", "isI",
+  "toggle", "tooltip", "loadResources", "loadJS", "getLoc", "getURL", "showToast", "uploadFile", "connectWs", "sendDDP",
+  "resetWiFi", "addWiFi", "rstR", "aR", "tE", "addLEDs", "bLimits", "resetCOM", "addCOM", "addBtn", "addRow",
+  "hideNoDMXOutput", "hideDMXInput", "hideNoDMXInput", "addInfo", "resetPanels", "addPanel", "numM", "maxPanels", "sd", "init"
+];
+
+function updateCache(result) {
+  if (result.nameCache) {
+    if (result.nameCache.vars) nameCache.vars = Object.assign(nameCache.vars, result.nameCache.vars);
+    if (result.nameCache.props) nameCache.props = Object.assign(nameCache.props, result.nameCache.props);
+  }
+}
+
+function getReservedFromHtml(html) {
+  const reserved = new Set(reservedNames);
+  // Match on...="handler()" or on...="handler"
+  // Pick only the function name (first word)
+  const regex = /\bon[a-z]+\s*=\s*["']\s*(\w+)/gi;
+  let match;
+  while ((match = regex.exec(html)) !== null) {
+    reserved.add(match[1]);
+  }
+  return Array.from(reserved);
+}
+
+async function minify(str, type = "plain", sourceFile = "") {
+  let reserved = reservedNames;
+  if (sourceFile && sourceFile.endsWith(".htm")) {
+    reserved = getReservedFromHtml(str);
+  }
+
+  const minifyJSConfig = {
+    toplevel: true,
+    mangle: {
+      reserved: reserved,
+      toplevel: true
+    },
+    compress: {
+      unused: false // don't remove functions even if they seem unused (since they might be used in HTML)
+    },
+    nameCache: nameCache
+  };
+
   const options = {
     collapseWhitespace: true,
     conservativeCollapse: true, // preserve spaces in text
     collapseBooleanAttributes: true,
     collapseInlineTagWhitespace: true,
     minifyCSS: true,
-    minifyJS: true,
+    minifyJS: async (str) => {
+      let result = await Terser.minify(str, minifyJSConfig);
+      if (result.error) throw result.error;
+      updateCache(result);
+      return result.code;
+    },
     removeAttributeQuotes: true,
     removeComments: true,
     sortAttributes: true,
@@ -125,8 +178,10 @@ async function minify(str, type = "plain") {
   } else if (type == "css-minify") {
     return new CleanCSS({}).minify(str).styles;
   } else if (type == "js-minify") {
-    let js = await minifyHtml('<script>' + str + '</script>', options);
-    return js.replace(/<[\/]*script>/g, '');
+    let result = await Terser.minify(str, minifyJSConfig);
+    if (result.error) throw result.error;
+    updateCache(result);
+    return result.code;
   } else if (type == "html-minify") {
     return await minifyHtml(str, options);
   }
@@ -136,18 +191,18 @@ async function minify(str, type = "plain") {
 
 async function writeHtmlGzipped(sourceFile, resultFile, page, inlineCss = true) {
   console.info("Reading " + sourceFile);
-  inline.html({
-    fileContent: fs.readFileSync(sourceFile, "utf8"),
-    relativeTo: path.dirname(sourceFile),
-    strict: inlineCss,     // when not inlining css, ignore errors (enables linking style.css from subfolder htm files)
-    stylesheets: inlineCss // when true (default), css is inlined
-  },
-    async function (error, html) {
-      if (error) throw error;
+  await new Promise((resolve, reject) => {
+    inline.html({
+      fileContent: fs.readFileSync(sourceFile, "utf8"),
+      relativeTo: path.dirname(sourceFile),
+      strict: inlineCss,     // when not inlining css, ignore errors (enables linking style.css from subfolder htm files)
+      stylesheets: inlineCss // when true (default), css is inlined
+    }, async (error, html) => {
+      if (error) return reject(error);
 
       html = adoptVersionAndRepo(html);
       const originalLength = html.length;
-      html = await minify(html, "html-minify");
+      html = await minify(html, "html-minify", sourceFile);
       const result = zlib.gzipSync(html, { level: zlib.constants.Z_BEST_COMPRESSION });
       console.info("Minified and compressed " + sourceFile + " from " + originalLength + " to " + result.length + " bytes");
       const array = hexdump(result);
@@ -156,7 +211,9 @@ async function writeHtmlGzipped(sourceFile, resultFile, page, inlineCss = true) 
       src += `const uint8_t PAGE_${page}[] PROGMEM = {\n${array}\n};\n\n`;
       console.info("Writing " + resultFile);
       fs.writeFileSync(resultFile, src);
+      resolve();
     });
+  });
 }
 
 async function specToChunk(srcDir, s) {
@@ -169,14 +226,14 @@ async function specToChunk(srcDir, s) {
     const originalLength = str.length;
     if (s.method == "gzip") {
       if (s.mangle) str = s.mangle(str);
-      const zip = zlib.gzipSync(await minify(str, s.filter), { level: zlib.constants.Z_BEST_COMPRESSION });
+      const zip = zlib.gzipSync(await minify(str, s.filter, s.file), { level: zlib.constants.Z_BEST_COMPRESSION });
       console.info("Minified and compressed " + s.file + " from " + originalLength + " to " + zip.length + " bytes");
       const result = hexdump(zip);
       chunk += `const uint16_t ${s.name}_length = ${zip.length};\n`;
       chunk += `const uint8_t ${s.name}[] PROGMEM = {\n${result}\n};\n\n`;
       return chunk;
     } else {
-      const minified = await minify(str, s.filter);
+      const minified = await minify(str, s.filter, s.file);
       console.info("Minified " + s.file + " from " + originalLength + " to " + minified.length + " bytes");
       chunk += `const char ${s.name}[] PROGMEM = R"${s.prepend || ""}${minified}${s.append || ""}";\n\n`;
       return s.mangle ? s.mangle(chunk) : chunk;
@@ -240,10 +297,9 @@ function isAlreadyBuilt(webUIPath, packageJsonPath = "package.json") {
 }
 
 // Don't run this script if we're in a test environment
-if (process.env.NODE_ENV === 'test') {
-  return;
-}
+if (process.env.NODE_ENV === 'test') return;
 
+(async () => {
 console.info(wledBanner);
 
 if (isAlreadyBuilt("wled00/data") && process.argv[2] !== '--force' && process.argv[2] !== '-f') {
@@ -251,13 +307,12 @@ if (isAlreadyBuilt("wled00/data") && process.argv[2] !== '--force' && process.ar
   return;
 }
 
-writeHtmlGzipped("wled00/data/index.htm", "wled00/html_ui.h", 'index');
-writeHtmlGzipped("wled00/data/pixart/pixart.htm", "wled00/html_pixart.h", 'pixart');
-writeHtmlGzipped("wled00/data/pxmagic/pxmagic.htm", "wled00/html_pxmagic.h", 'pxmagic');
-writeHtmlGzipped("wled00/data/pixelforge/pixelforge.htm", "wled00/html_pixelforge.h", 'pixelforge', false); // do not inline css
-//writeHtmlGzipped("wled00/data/edit.htm", "wled00/html_edit.h", 'edit');
+await writeHtmlGzipped("wled00/data/index.htm", "wled00/html_ui.h", 'index');
+await writeHtmlGzipped("wled00/data/pixart/pixart.htm", "wled00/html_pixart.h", 'pixart');
+await writeHtmlGzipped("wled00/data/pxmagic/pxmagic.htm", "wled00/html_pxmagic.h", 'pxmagic');
+await writeHtmlGzipped("wled00/data/pixelforge/pixelforge.htm", "wled00/html_pixelforge.h", 'pixelforge', false); // do not inline css
 
-writeChunks(
+await writeChunks(
   "wled00/data/",
   [
     {
@@ -271,7 +326,7 @@ writeChunks(
   "wled00/js_iro.h"
 );
 
-writeChunks(
+await writeChunks(
   "wled00/data",
   [
     {
@@ -284,7 +339,7 @@ writeChunks(
   "wled00/html_edit.h"
 );
 
-writeChunks(
+await writeChunks(
   "wled00/data/cpal",
   [
     {
@@ -297,7 +352,7 @@ writeChunks(
   "wled00/html_cpal.h"
 );
 
-writeChunks(
+await writeChunks(
   "wled00/data",
   [
     {
@@ -385,7 +440,7 @@ writeChunks(
   "wled00/html_settings.h"
 );
 
-writeChunks(
+await writeChunks(
   "wled00/data",
   [
     {
@@ -406,7 +461,7 @@ writeChunks(
       mangle: (str) => str.replace(/\<h2\>.*\<\/body\>/gms, "<h2>%MSG%</body>"),
     },
     {
-      file: "dmxmap.htm",
+    file: "dmxmap.htm",
       name: "PAGE_dmxmap",
       prepend: "=====(",
       append: ")=====",
@@ -458,3 +513,4 @@ const char PAGE_dmxmap[] PROGMEM = R"=====()=====";
   ],
   "wled00/html_other.h"
 );
+})().catch(console.error);
