@@ -357,19 +357,111 @@ void handleButton()
     lastAnalogRead = now;
   }
 }
-#if defined(CONFIG_IDF_TARGET_ESP32C3)
+
+
+static inline void nop_delay(int count) {
+  switch (count) {
+    default:
+      for (int i=0; i < count; i++) {
+          __asm__ __volatile__ ("nop");
+      }
+    case 3: __asm__ __volatile__ ("nop");
+    case 2: __asm__ __volatile__ ("nop");
+    case 1: __asm__ __volatile__ ("nop");
+    case 0: break;
+  }
+}
+
+#if SOC_DEDICATED_GPIO_SUPPORTED
 #include "driver/dedic_gpio.h"
+#endif
+// pulse relay pin with slowly increasing pulse length for a "soft on" to avoid white flash
+IRAM_ATTR void pulseRelayPin(uint8_t rlyPin, bool rlyMde, uint32_t pulses) {
+  int nopcount = 0;
+  uint32_t mask = (1ULL << (rlyPin % 32));
+  #ifndef ESP8266
+  portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+  #endif
+  #if SOC_DEDICATED_GPIO_SUPPORTED // S3, S2, C3
+  // note: using GPIO bundle cuts down pulse lenth from 700ns to 400ns and about 120ns using an IRAM_ATTR function  TODO: test again and measure
+  dedic_gpio_bundle_handle_t rly_bundle = NULL;
+  int gpio_pins[] = { rlyPin };
+
+  dedic_gpio_bundle_config_t bundle_config = {
+    .gpio_array = gpio_pins,
+    .array_size = 1, // Only one pin in this bundle
+    .flags = {
+        .out_en = 1, // Enable as output
+    },
+  };
+  dedic_gpio_new_bundle(&bundle_config, &rly_bundle);
+  uint32_t onVal  = rlyMde ? 0x01 : 0x00;
+  uint32_t offVal = onVal ^ 0x01;
+
+  #elif defined(ESP8266)
+  volatile uint32_t* active = rlyMde ? (volatile uint32_t*)GPOS : (volatile uint32_t*)GPOC;
+  volatile uint32_t* inactive = rlyMde ? (volatile uint32_t*)GPOC : (volatile uint32_t*)GPOS;
+  #else // ESP32
+  volatile uint32_t* regSet = (rlyPin < 32) ? &GPIO.out_w1ts : &GPIO.out1_w1ts.val;
+  volatile uint32_t* regClr = (rlyPin < 32) ? &GPIO.out_w1tc : &GPIO.out1_w1tc.val;
+  volatile uint32_t* active = rlyMde ? regSet : regClr;
+  volatile uint32_t* inactive = rlyMde ? regClr : regSet;
+  #endif
+  for (uint32_t i = 0; i <= pulses; i++) {
+    #if defined(ESP8266)
+    noInterrupts();
+    #else
+    portENTER_CRITICAL(&mux);
+    #endif
+
+    #if defined(SOC_DEDICATED_GPIO_SUPPORTED)
+    dedic_gpio_bundle_write(rly_bundle, 0x01, onVal);
+    nop_delay(nopcount);
+    dedic_gpio_bundle_write(rly_bundle, 0x01, offVal);
+    #else // Standard ESP32 & ESP8266
+    *active = mask;
+    nop_delay(nopcount);
+    *inactive = mask;
+    #endif
+    #if defined(ESP8266)
+      interrupts();
+    #else
+      portEXIT_CRITICAL(&mux);
+    #endif
+    delayMicroseconds(10); // fixed delay means increasing dutycycle
+    int stepup = 5;
+    if (i > 50) {
+      if (i % 10 == 0) {
+        nopcount++; // start increasing pulse lenngth after 100 pulses (needed for large pulldowns)
+        if (nopcount > 5) nopcount+=5; // increase faster after 5 steps, if power is not on at this point, it needs a much longer pulse, a single nop is a tiny step
+        delay(0); // yield to other tasks, causes an extra ~10us delay
+      }
+    }
+    else
+      delayMicroseconds(50); // high value pulldowns: much more delay to turn fet slowly: voltage can rises in quite large steps, give LED strip time to boot up
+  }
+  #if SOC_DEDICATED_GPIO_SUPPORTED
+  // deallcoate the bundle after use and make it a normal GPIO again
+  dedic_gpio_del_bundle(rly_bundle);
+  gpio_reset_pin((gpio_num_t)rlyPin);
+  pinMode(rlyPin, rlyOpenDrain ? OUTPUT_OPEN_DRAIN : OUTPUT);
+  #endif
+}
+
+
+#if SOC_DEDICATED_GPIO_SUPPORTED
+/*
 IRAM_ATTR void pulseRelayPin(dedic_gpio_bundle_handle_t rly_bundle)
 {
     if (rlyMde) {
-    dedic_gpio_bundle_write(rly_bundle, 0x01, 0x01); // set high ~400ns
+    dedic_gpio_bundle_write(rly_bundle, 0x01, 0x01); // set high
     dedic_gpio_bundle_write(rly_bundle, 0x01, 0x00); // set low
   }
   else {
     dedic_gpio_bundle_write(rly_bundle, 0x01, 0x00); // set low
     dedic_gpio_bundle_write(rly_bundle, 0x01, 0x01); // set high
   }
-}
+}*/
 
 #endif
 
@@ -383,8 +475,8 @@ IRAM_ATTR void handleOnOff(bool forceOff)
       if (rlyPin>=0) {
         // note: pinMode is set in first call to handleOnOff(true) in beginStrip()
         // pulse the relay pin fast for a "soft on" to avoid white flash (experimental)
-        // pulse length: ESP32/S3/S2 ~50ns, C3 ~700ns, ESP8266: 70ns
-
+        // minimum pulse length: ESP32/S3/S2 ~50ns, C3 ~120ns, ESP8266: 70ns
+/*
         #if defined(CONFIG_IDF_TARGET_ESP32C3)
         // note: using GPIO bundle cuts down pulse lenth from 700ns to 400ns and about 120ns using an IRAM_ATTR function
         dedic_gpio_bundle_handle_t rly_bundle = NULL;
@@ -400,8 +492,8 @@ IRAM_ATTR void handleOnOff(bool forceOff)
         dedic_gpio_new_bundle(&bundle_config, &rly_bundle);
         #endif
         uint32_t mask = (1U << rlyPin);
-        int pulses = 100; // number of pulses
-
+        int pulses = 4000; // number of pulses
+        int nopdelay = 0;
         do {
           #if defined(ESP8266)
           if (rlyMde) {
@@ -414,20 +506,29 @@ IRAM_ATTR void handleOnOff(bool forceOff)
           }
           #elif defined(CONFIG_IDF_TARGET_ESP32C3)
           pulseRelayPin(rly_bundle); // pulse must be an IRAM_ATTR function to achieve the best timing (brings it down from 400ns to 100ns)
-          #else
+          #else //ESP32 xtensa
+          if (pulses % 16 == 0) 
+            nopdelay++;
           volatile uint32_t* outSet = (rlyPin < 32) ? &GPIO.out_w1ts : &GPIO.out1_w1ts.val;
           volatile uint32_t* outClr = (rlyPin < 32) ? &GPIO.out_w1tc : &GPIO.out1_w1tc.val;
 
-          if (rlyMde) {
-            *outSet = mask; // set high
-            *outClr = mask; // set low
+          // inverted relay logic, swap the pointers
+          if (!rlyMde) {
+              volatile uint32_t* temp = outSet;
+              outSet = outClr;
+              outClr = temp;
           }
-          else {
-            *outClr = mask; // set low
-            *outSet = mask; // set high
-          }
+        //  volatile uint32_t* regSet = (rlyPin < 32) ? &GPIO.out_w1ts : &GPIO.out1_w1ts.val;
+        //  volatile uint32_t* regClr = (rlyPin < 32) ? &GPIO.out_w1tc : &GPIO.out1_w1tc.val;
+        //  volatile uint32_t* outSet = rlyMde ? regSet : regClr;
+        //  volatile uint32_t* outClr = rlyMde ? regClr : regSet;
+          // fast output pulse 
+          *outSet = mask; // set high
+          nop_delay(nopdelay);
+          *outClr = mask; // set low
+
           #endif
-          delayMicroseconds(50); // short delay to make this a very low duty cycle pulse
+          delayMicroseconds(2); // short delay to make this a very low duty cycle pulse
           delay(0); // yield to other tasks
         } while (pulses--);
 
@@ -436,7 +537,8 @@ IRAM_ATTR void handleOnOff(bool forceOff)
         dedic_gpio_del_bundle(rly_bundle);
         gpio_reset_pin((gpio_num_t)rlyPin);
         pinMode(rlyPin, rlyOpenDrain ? OUTPUT_OPEN_DRAIN : OUTPUT);
-        #endif
+        #endif*/
+        pulseRelayPin(rlyPin, rlyMde, 500); // pulse the relay pin fast for a "soft on" to avoid white flash
         digitalWrite(rlyPin, rlyMde); // set to on state
       }
       offMode = false;
