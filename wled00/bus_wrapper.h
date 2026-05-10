@@ -93,7 +93,6 @@ inline WLEDpixelBus::LedTiming getProtocol(uint8_t wledType) {
 
 class PixelBusAllocator {
   private:
-  private:
     static uint16_t _memTrackedDrivers; // track which driver types have already accounted for shared memory overhead
   #ifndef ESP8266
     static uint8_t _rmtChannelsAssigned;

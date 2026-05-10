@@ -65,6 +65,7 @@ private:
   inline void bbSetClk(bool high) const;
 
   void sendByte(uint8_t d);
+  void sendBytes(const uint8_t* buf, size_t len);
   void sendStartFrame(uint16_t numPixels);
   void sendEndFrame(uint16_t numPixels);
 };

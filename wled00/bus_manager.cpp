@@ -188,7 +188,16 @@ BusDigital::BusDigital(const BusConfig &bc)
     if (hasWW && hasCW) _hasCCT = true;
   } else {
     // create bus via PixelBusAllocator wrapper which will return a WLEDpixelBus::PixelBus
-    _busPtr = PixelBusAllocator::create(bc.type, _pins, lenToCreate + _skip, bc.colorOrder, _driverType, bc.busSpeedFactor);
+    if (is2Pin(bc.type) && _frequencykHz) {
+      // Convert UI-configured SPI clock frequency to a LedTiming so SpiBus::begin() uses it.
+      // bitPeriod() = (t0h+t0l+t1h+t1l)/2. For 4 equal fields: eachNs = 500000 / freq_kHz.
+      // Example: 2000 kHz → eachNs=250 → bitPeriod=500 ns → 2 MHz. 10000 kHz → 50 ns → 10 MHz.
+      const uint16_t eachNs = (uint16_t)(500000UL / _frequencykHz);
+      const WLEDpixelBus::LedTiming freqTiming(eachNs, eachNs, eachNs, eachNs, 0);
+      _busPtr = PixelBusAllocator::create(bc.type, _pins, lenToCreate + _skip, bc.colorOrder, _driverType, bc.busSpeedFactor, 0, &freqTiming);
+    } else {
+      _busPtr = PixelBusAllocator::create(bc.type, _pins, lenToCreate + _skip, bc.colorOrder, _driverType, bc.busSpeedFactor);
+    }
   }
   _valid = (_busPtr != nullptr) && bc.count > 0;
 
@@ -229,7 +238,7 @@ void BusDigital::setBrightness(uint8_t b) {
   _bri = b;
   if (!_busPtr) return;
   if (_type == TYPE_TM1814 || _type == TYPE_TM1815) {
-    // TM1814/TM1815: coarse brightness via hardware drive current (64 steps),
+    // TM1814/TM1815: coarse brightness via hardware drive current (6bit, 64 steps),
     // fine residual applied via color_fade() in setPixelColor().
     uint8_t currentStep, residualBri;
     WLEDpixelBus::mapBrightnessToCurrentStep(b, 64, 44, currentStep, residualBri);
@@ -239,12 +248,11 @@ void BusDigital::setBrightness(uint8_t b) {
     _busPtr->updatePrefix(prefix, 8);
     _busPtr->setBusBri(residualBri);      // used by color_fade() in setPixelColor()
   } else if (_type == TYPE_APA102) {
-    // APA102: two-stage brightness. Hardware 5-bit brightness byte (0..31) for coarse
-    // control, color_fade() residual for fine interpolation between steps.
-    // minBri=8 reflects step-0 = 1/31 of max current (~3.2% of full brightness).
+    // APA102: two-stage brightness. Hardware 5-bit brightness (0..31) for coarse control, color_fade() residual for fine interpolation between steps.
+    // minBri=8 is 256/32steps, for bri<8 mapBrightnessToCurrentStep() returns step=0 which means "off" so add 1
     uint8_t hwStep, residualBri;
-    WLEDpixelBus::mapBrightnessToCurrentStep(b, 32, 8, hwStep, residualBri);
-    _busPtr->setApa102HwBri(hwStep);
+    WLEDpixelBus::mapBrightnessToCurrentStep(b, 31, 8, hwStep, residualBri);
+    _busPtr->setApa102HwBri(hwStep+1);    // APA102 brightness steps are 1-based (0 is off)
     _busPtr->setBusBri(residualBri);      // used by color_fade() in setPixelColor()
   } else if (is16bit()) {
     // 16-bit LED types (SM16825, UCS8903, UCS8904): color_fade() is a no-op (_busBri=255);

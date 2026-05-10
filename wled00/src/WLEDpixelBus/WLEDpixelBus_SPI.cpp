@@ -5,17 +5,19 @@
 #include "soc/gpio_reg.h"
 #endif
 
+#define SPI_MAX_CLOCK_HZ 40000000UL // maximum SPI clock supported by all target platforms (ESP8266 max is 20 MHz, ESP32 can do 80 MHz but we clamp to 20 MHz for compatibility with ESP8266 and timing accuracy)
+
 namespace WLEDpixelBus {
 
-// Derive SPI clock Hz from timing bitPeriod, clamped to [1 MHz, 20 MHz].
+// Derive SPI clock Hz from timing bitPeriod, clamped to [1 MHz, SPI_MAX_CLOCK_HZ].
 // APA102 {250,250,250,250,0} -> period=500ns -> 2 MHz
 // WS2801 {500,500,500,500,1000} -> period=1000ns -> 1 MHz (clamped min)
 static uint32_t timingToClockHz(const LedTiming& t) {
   const uint32_t periodNs = t.bitPeriod();
-  if (periodNs == 0) return 2000000;
+  if (periodNs == 0) return SPI_MAX_CLOCK_HZ;
   uint32_t hz = 1000000000UL / periodNs;
   if (hz < 1000000)  hz = 1000000;   // minimum 1 MHz
-  if (hz > 20000000) hz = 20000000;  // maximum 20 MHz  // TODO: make this a define and check if ESP8266 can do 40 MHz
+  if (hz > SPI_MAX_CLOCK_HZ) hz = SPI_MAX_CLOCK_HZ; 
   return hz;
 }
 
@@ -114,7 +116,7 @@ inline void SpiBus::bbSetClk(bool high) const {
 
 void SpiBus::sendByte(uint8_t d) {
   if (_useHardware) {
-    SPI.transfer(d);
+    SPI.write(d);  // write() skips the MISO read that transfer() performs, reducing per-byte overhead
   } else {
     // MSB-first bit-bang, SPI mode 0 (CPOL=0, CPHA=0):
     // data is set up while clock is low, sampled on rising edge.
@@ -127,7 +129,18 @@ void SpiBus::sendByte(uint8_t d) {
   }
 }
 
+void SpiBus::sendBytes(const uint8_t* buf, size_t len) {
+  if (_useHardware) {
+    // writeBytes() fills the SPI FIFO in one call, eliminating per-byte function-call overhead.
+    // The cast is safe: writeBytes() does not modify the buffer.
+    SPI.writeBytes(const_cast<uint8_t*>(buf), (uint32_t)len);
+  } else {
+    for (size_t i = 0; i < len; i++) sendByte(buf[i]);
+  }
+}
+
 void SpiBus::sendStartFrame(uint16_t numPixels) {
+  static const uint8_t zeros[4] = {0, 0, 0, 0};
   if (_ledType == TYPE_LPD8806) {
     // LPD8806: start frame is ceil(N/32) zero bytes to clock in the initial latch
     const uint16_t n = (numPixels + 31) / 32;
@@ -135,7 +148,7 @@ void SpiBus::sendStartFrame(uint16_t numPixels) {
   } else if (_ledType != TYPE_WS2801) {
     // APA102 / LPD6803 / P9813: fixed 4-byte zero start frame
     // WS2801: no start frame — latch is the reset-time gap between frames
-    sendByte(0x00); sendByte(0x00); sendByte(0x00); sendByte(0x00);
+    sendBytes(zeros, 4);
   }
 }
 
@@ -159,7 +172,8 @@ void SpiBus::sendEndFrame(uint16_t numPixels) {
     const uint16_t n = (numPixels + 31) / 32;
     for (uint16_t i = 0; i < n; i++) sendByte(0xFF);
   } else if (_ledType == TYPE_P9813) {
-    sendByte(0x00); sendByte(0x00); sendByte(0x00); sendByte(0x00);
+    static const uint8_t zeros[4] = {0, 0, 0, 0};
+    sendBytes(zeros, 4);
   }
   // TYPE_WS2801: nothing to send
 }
@@ -180,29 +194,26 @@ bool SpiBus::show(const uint32_t* /*pixels*/, uint16_t /*numPixels*/, const CctP
 
   if (_ledType == TYPE_APA102) {
     // APA102 per-pixel wire format: [0xE0|brightness5bit, byte0, byte1, byte2]
-    // 0xE0|0x1F == 0xFF == full hardware brightness (5-bit field, 0x1F = max)
+    // sendByte for the brightness header, then sendBytes for the 3 color bytes.
+    const uint8_t bri = 0xE0 | _apa102HwBri;
     for (uint16_t i = 0; i < _numPixels; i++) {
-      sendByte(0xE0 | _apa102HwBri);
-      const uint8_t* src = _encodeBuffer + (size_t)i * pixelBytes;
-      for (uint8_t ch = 0; ch < pixelBytes; ch++) sendByte(src[ch]);
+      sendByte(bri);
+      sendBytes(_encodeBuffer + (size_t)i * pixelBytes, pixelBytes);
     }
   } else if (_ledType == TYPE_P9813) {
     // P9813 per-pixel wire format: [flag, B, G, R]
     // flag = 0xC0 | (~B[7:6]>>2) | (~G[7:6]>>4) | (~R[7:6]>>6)
-    // _encodeBuffer bytes are already in wire order (BGR = indices 0,1,2 when
-    // color order is configured as BGR, which is the P9813 native order).
     for (uint16_t i = 0; i < _numPixels; i++) {
       const uint8_t* src = _encodeBuffer + (size_t)i * pixelBytes;
       const uint8_t b = src[0], g = src[1], r = src[2];
       const uint8_t flag = 0xC0 | ((~b & 0xC0) >> 2) | ((~g & 0xC0) >> 4) | ((~r & 0xC0) >> 6);
-      sendByte(flag); sendByte(b); sendByte(g); sendByte(r);
+      sendByte(flag);
+      sendBytes(src, 3);
     }
   } else {
-    // WS2801 / LPD8806 / LPD6803: raw encoded bytes, no per-pixel framing byte
-    for (uint16_t i = 0; i < _numPixels; i++) {
-      const uint8_t* src = _encodeBuffer + (size_t)i * pixelBytes;
-      for (uint8_t ch = 0; ch < pixelBytes; ch++) sendByte(src[ch]);
-    }
+    // WS2801 / LPD8806 / LPD6803: raw encoded bytes — send the entire pixel buffer
+    // in one SPI transaction for maximum throughput (no per-byte function call overhead).
+    sendBytes(_encodeBuffer, (size_t)_numPixels * pixelBytes);
   }
 
   sendEndFrame(_numPixels);
