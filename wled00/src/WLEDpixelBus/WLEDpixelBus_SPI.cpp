@@ -60,7 +60,7 @@ bool SpiBus::begin() {
     _dataMask = 1UL << (_dataHigh ? (_dataPin - 32) : _dataPin);
     _clkMask  = 1UL << (_clkHigh  ? (_clockPin - 32) : _clockPin);
     // Drive both lines LOW initially
-#ifdef CONFIG_IDF_TARGET_ESP32
+#ifdef ESP_HAS_HIGH_GPIO_BANK
     if (_dataHigh) REG_WRITE(GPIO_OUT1_W1TC_REG, _dataMask); else REG_WRITE(GPIO_OUT_W1TC_REG, _dataMask);
     if (_clkHigh)  REG_WRITE(GPIO_OUT1_W1TC_REG, _clkMask);  else REG_WRITE(GPIO_OUT_W1TC_REG, _clkMask);
 #else
@@ -97,7 +97,7 @@ void SpiBus::end() {
 // race conditions and is faster than GPIO_OUT read-modify-write.
 inline void SpiBus::bbSetData(bool high) const {
 #if defined(ARDUINO_ARCH_ESP32)
-#ifdef CONFIG_IDF_TARGET_ESP32
+#ifdef ESP_HAS_HIGH_GPIO_BANK
   if (high) {
     if (_dataHigh) REG_WRITE(GPIO_OUT1_W1TS_REG, _dataMask); else REG_WRITE(GPIO_OUT_W1TS_REG, _dataMask);
   } else {
@@ -117,7 +117,7 @@ inline void SpiBus::bbSetData(bool high) const {
 
 inline void SpiBus::bbSetClk(bool high) const {
 #if defined(ARDUINO_ARCH_ESP32)
-#ifdef CONFIG_IDF_TARGET_ESP32
+#ifdef ESP_HAS_HIGH_GPIO_BANK
   if (high) {
     if (_clkHigh) REG_WRITE(GPIO_OUT1_W1TS_REG, _clkMask); else REG_WRITE(GPIO_OUT_W1TS_REG, _clkMask);
   } else {
