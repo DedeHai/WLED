@@ -428,7 +428,7 @@ std::vector<LEDType> BusDigital::getLEDTypes() {
 }
 
 bool BusDigital::isI2S() {
-  return _driverType == 1; // driverType 1 = I2S/LCD
+  return _driverType == BUSDRV_I2S; // I2S/LCD/ParallelSPI
 }
 
 void BusDigital::begin() {
@@ -1410,7 +1410,10 @@ void BusManager::off() {
 void BusManager::show() {
   applyABL(); // apply brightness limit, updates _gMilliAmpsUsed
   for (auto &bus : busses) {
-    bus->show();
+    if (bus->getDriverType() == BUSDRV_BITBANG) bus->show(); // run bit bang buses first, they do block interrupts and cant run in parallel with other types
+  }
+  for (auto &bus : busses) {
+    if (bus->getDriverType() != BUSDRV_BITBANG) bus->show();
   }
 }
 
