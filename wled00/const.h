@@ -55,10 +55,10 @@ constexpr size_t FIXED_PALETTE_COUNT = DYNAMIC_PALETTE_COUNT + FASTLED_PALETTE_C
 #endif
 
 #ifdef ESP8266
-  #define WLED_MAX_DIGITAL_CHANNELS 8       // do not restrict multiple bit-bang channels, even if it is slow  TODO: could implement parallel bit-bang output to speed things up
+  #define WLED_MAX_DIGITAL_CHANNELS 8
   #define WLED_MAX_RMT_CHANNELS 0           // ESP8266 does not have RMT nor I2S
   #define WLED_MAX_I2S_CHANNELS 0
-  #define WLED_MAX_BB_CHANNELS  0           // ESP8266 has its own BitBang driver, not the ESP32 parallel one
+  #define WLED_MAX_BB_CHANNELS  8           // ESP8266 parallel bit-bang channels (all share same LED type/timing)
   #define WLED_MAX_ANALOG_CHANNELS 5
   #define WLED_PLATFORM_ID 0         // used in UI to distinguish ESP types, needs a proper fix!
 #else
