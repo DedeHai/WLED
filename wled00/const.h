@@ -95,7 +95,8 @@ constexpr size_t FIXED_PALETTE_COUNT = DYNAMIC_PALETTE_COUNT + FASTLED_PALETTE_C
     #endif
     #define WLED_PLATFORM_ID 4       // used in UI to distinguish ESP type in UI, needs a proper fix!
   #endif
-  #define WLED_MAX_BB_CHANNELS 8           // max parallel BitBang channels (GPIO 0-31 only)
+  #define WLED_MAX_TIMERS 64                // maximum number of timers
+  #define WLED_MAX_BB_CHANNELS 8            // max parallel BitBang channels
   #define WLED_MAX_DIGITAL_CHANNELS (WLED_MAX_RMT_CHANNELS + WLED_MAX_I2S_CHANNELS + WLED_MAX_BB_CHANNELS) // total number of digital channels (RMT + I2S + BitBang)
 #endif
 // WLED_MAX_BUSSES was used to define the size of busses[] array which is no longer needed
