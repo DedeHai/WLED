@@ -58,7 +58,7 @@ constexpr size_t FIXED_PALETTE_COUNT = DYNAMIC_PALETTE_COUNT + FASTLED_PALETTE_C
   #define WLED_MAX_DIGITAL_CHANNELS 8
   #define WLED_MAX_RMT_CHANNELS 0           // ESP8266 does not have RMT nor I2S
   #define WLED_MAX_I2S_CHANNELS 0
-  #define WLED_MAX_BB_CHANNELS  8           // ESP8266 parallel bit-bang channels (all share same LED type/timing)
+  #define WLED_MAX_BB_CHANNELS  4           // ESP8266 parallel bit-bang channels (all share same LED type/timing) can be set to 8 if more outputs are needed
   #define WLED_MAX_ANALOG_CHANNELS 5
   #define WLED_PLATFORM_ID 0         // used in UI to distinguish ESP types, needs a proper fix!
 #else
