@@ -319,7 +319,7 @@ constexpr size_t FIXED_PALETTE_COUNT = DYNAMIC_PALETTE_COUNT + FASTLED_PALETTE_C
 #define TYPE_WS2812_1CH_X3       19            // (migration only: old configs auto-migrate to TYPE_CUSTOM_BUS)
 #define TYPE_WS2812_WWA          21            // (migration only: old configs auto-migrate to TYPE_CUSTOM_BUS)
 #define TYPE_WS2812_RGB          22
-#define TYPE_GS8608              23            //same driver as WS2812, but will require signal 2x per second (else displays test pattern)
+//#define TYPE_GS8608              23            //same driver as WS2812, but will require signal 2x per second (else displays test pattern), unused just use WS2812 with off refresh
 #define TYPE_WS2811_400KHZ       24            //half-speed WS2812 protocol, used by very old WS2811 units
 #define TYPE_TM1829              25
 #define TYPE_UCS8903             26
@@ -333,7 +333,6 @@ constexpr size_t FIXED_PALETTE_COUNT = DYNAMIC_PALETTE_COUNT + FASTLED_PALETTE_C
 #define TYPE_SM16825             34            //RGB + WW + CW
 #define TYPE_TM1815              35            //RGBW (half speed TM1814)
 //TODO add support for SM16714, see https://wled.discourse.group/t/sm16714-pixel-ic/9794
-#define TYPE_CUSTOM_BUS          39            // fully configurable single-wire digital type (1-6 channels, custom per-channel color mapping)
 #define TYPE_DIGITAL_MAX         39            // last usable digital type
 //"Analog" types (40-47)
 #define TYPE_ONOFF               40            //binary output (relays etc.; NOT PWM)

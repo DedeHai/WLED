@@ -126,7 +126,7 @@ uint32_t Bus::autoWhiteCalc(uint32_t c, uint8_t &ww, uint8_t &cw) const {
 }
 
 // Default implementation for Bus::getCustomBusConfig() — returns a static default.
-// BusDigital and BusPlaceholder override this when type == TYPE_CUSTOM_BUS.
+// BusDigital and BusPlaceholder override this when custom.active() == true.
 const CustomBusConfig& Bus::getCustomBusConfig() const {
   static const CustomBusConfig _defaultCustom;
   return _defaultCustom;
@@ -163,8 +163,8 @@ BusDigital::BusDigital(const BusConfig &bc)
   _hasCCT = hasCCT(bc.type);
   uint16_t lenToCreate = bc.count;
 
-  // For TYPE_CUSTOM_BUS: store custom config, use per-instance numChannels and timing
-  if (bc.type == TYPE_CUSTOM_BUS) {
+  // Customized channel map/timing override
+  if (bc.custom.active()) {
     _pCustomConfig = new CustomBusConfig(bc.custom);
     const uint8_t nch = bc.custom.is16bit ? bc.custom.numChannels * 2 : bc.custom.numChannels;
     const WLEDpixelBus::LedTiming customTiming(bc.custom.t0h, bc.custom.t0l, bc.custom.t1h, bc.custom.t1l, bc.custom.trst);
@@ -179,7 +179,7 @@ BusDigital::BusDigital(const BusConfig &bc)
     bool hasWW = false, hasCW = false;
     for (uint8_t i = 0; i < bc.custom.numChannels; i++) {
       switch (bc.custom.channelColors[i]) {
-        case 1: case 2: case 3: _hasRgb = true; break;
+        case 1: case 2: case 3: _hasRgb = true; break; // at least one color channel is used
         case 4: _hasWhite = true; break;
         case 5: hasWW = true; break;
         case 6: hasCW = true; break;
@@ -420,14 +420,18 @@ std::vector<LEDType> BusDigital::getLEDTypes() {
     {TYPE_TM1914,        "D",  PSTR("TM1914")},
     {TYPE_FW1906,        "D",  PSTR("FW1906 GRBCW")},
     {TYPE_UCS8904,       "D",  PSTR("UCS8904 RGBW")},
-    {TYPE_WS2805,        "D",  PSTR("WS2805 RGBCW")},
-    {TYPE_SM16825,       "D",  PSTR("SM16825 RGBCW")},
-    {TYPE_CUSTOM_BUS,    "D",  PSTR("Custom Digital")}, // fully configurable channel map
-    {TYPE_WS2801,        "2P", PSTR("WS2801")},
-    {TYPE_APA102,        "2P", PSTR("APA102")},
-    {TYPE_LPD8806,       "2P", PSTR("LPD8806")},
-    {TYPE_LPD6803,       "2P", PSTR("LPD6803")},
-    {TYPE_P9813,         "2P", PSTR("PP9813")},
+    {TYPE_TM1814,        "D",  PSTR("TM1814 RGBW")},
+    {TYPE_TM1815,        "D",  PSTR("TM1815 RGBW")},
+    {TYPE_FW1906,        "D",  PSTR("FW1906/WS2811 RGBCCT")},
+    {TYPE_WS2805,        "D",  PSTR("WS2805 RGBCCT")},
+    {TYPE_SM16825,       "D",  PSTR("SM16825 RGBCCT")},
+    {TYPE_WS2812_1CH_X3, "D",  PSTR("WS2811 White")},
+    {TYPE_WS2812_WWA,    "D",  PSTR("WS281x WWA")}, // amber ignored
+    {TYPE_WS2801,        "2P", PSTR("WS2801 RGB")},
+    {TYPE_APA102,        "2P", PSTR("APA102 RGB")},
+    {TYPE_LPD8806,       "2P", PSTR("LPD8806 RGB")},
+    {TYPE_LPD6803,       "2P", PSTR("LPD6803 RGB")},
+    {TYPE_P9813,         "2P", PSTR("P9813 RGB")},
   };
 }
 
@@ -1212,7 +1216,7 @@ BusPlaceholder::BusPlaceholder(const BusConfig &bc)
 , _text(bc.text)
 {
   _busSpeedFactor = bc.busSpeedFactor; // preserve so config is restored faithfully on reboot
-  if (bc.type == TYPE_CUSTOM_BUS) _pCustomConfig = new CustomBusConfig(bc.custom);
+  if (bc.custom.active()) _pCustomConfig = new CustomBusConfig(bc.custom);
   memcpy(_pins, bc.pins, sizeof(_pins));
   PinOwner pinOwner = PinOwner::None;
   if (Bus::isDigital(bc.type) && bc.type != TYPE_ONOFF) pinOwner = PinOwner::BusDigital;
