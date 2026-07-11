@@ -242,9 +242,17 @@ bool SpiBus::show(const uint32_t* /*pixels*/, uint16_t /*numPixels*/, const CctP
       sendBytes(src, 3);
     }
   } else {
-    // WS2801 / LPD8806 / LPD6803: raw encoded bytes — send the entire pixel buffer
-    // in one SPI transaction for maximum throughput (no per-byte function call overhead).
-    sendBytes(_encodeBuffer, (size_t)_numPixels * pixelBytes);
+    // WS2801 / LPD8806 / LPD6803: raw encoded bytes, no per-pixel framing byte
+    uint8_t* src = _encodeBuffer;
+    if (_useHardware) {
+      SPI.transfer(src, pixelBytes*_numPixels);
+    }
+    else {
+      for (uint16_t i = 0; i < _numPixels; i++) {
+        for (uint8_t ch = 0; ch < pixelBytes; ch++) sendByte(src[ch]);
+        src += pixelBytes;
+      }
+    }
   }
 
   sendEndFrame(_numPixels);
