@@ -36,6 +36,11 @@
 #define I2S_PDM_RX_SLOT_DEFAULT_CONFIG I2S_PDM_RX_SLOT_PCM_FMT_DEFAULT_CONFIG
 #endif
 
+#if (ESP_IDF_VERSION_MAJOR >= 5) && defined(SOC_I2S_SUPPORTS_PDM_RX) && defined(I2S_PDM_RX_SLOT_RAW_FMT_DEFAULT_CONFIG) \
+    && ( defined(CONFIG_IDF_TARGET_ESP32C3) )
+#define AR_PDM_SW_DECODE_SUPPORTED // no hardware PDM->PCM decimator, use raw PDM bitstream and software-decoded CIC filter
+#endif
+
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 0)
 // type of i2s_config_t.SampleRate was changed from "int" to "unsigned" in IDF 4.4.x
 // also matches i2s_std_clk_config_t.sample_rate_hz of the IDF V5 driver
@@ -1253,4 +1258,260 @@ class SPH0654 : public I2SSource {
 #endif
     }
 };
+
+#if defined(AR_PDM_SW_DECODE_SUPPORTED)
+// PDMSource - software-decoded PDM microphone
+//   For ESP's that support PDM RX bitstream capture but have no hardware PDM->PCM decimator
+//   The raw 1-bit PDM bitstream is captured via I2S RAW format DMA and decimated to 16bit PCM in software
+//   using a 3rd-order CIC filter in integer math and using fast 8bit-LUTs, driven from the I2S RX-done interrupt
+
+#include <esp_heap_caps.h>
+// fixed decimation & framing parameters
+static constexpr uint32_t PDM_DECIMATION           = 64;                              // oversampling ratio; must be a multiple of 8
+static constexpr uint32_t PDM_BYTES_PER_SAMPLE      = PDM_DECIMATION / 8;             // "clean" bytes needed per output sample
+static constexpr uint32_t PDM_RAW_BYTES_PER_SAMPLE  = PDM_BYTES_PER_SAMPLE * 2;       // raw DMA bytes/output sample (2x: real + duplicate padding byte pair)
+static constexpr uint32_t PDM_SAMPLES_PER_BLOCK     = 64;                             // fixed DMA block size, in decoded output samples.
+static constexpr uint32_t PDM_DMA_FRAME_NUM         = PDM_SAMPLES_PER_BLOCK * (PDM_RAW_BYTES_PER_SAMPLE / 2);  // dma_frame_num counts 16bit words; = 64*8 = 512 -> 1024 bytes/block
+static constexpr uint32_t PDM_DMA_DESC_NUM          = 2;                              // ISR finishes in low tens of us vs multi-ms block period - little jitter margin needed
+static constexpr uint32_t PDM_RING_BUFFER_SAMPLES   = 1024;                           // power of 2, = 2x samplesFFT: one full FFT batch of slack against scheduling jitter
+
+struct PdmIsrState {
+  int16_t  *ring;                 // PDM_RING_BUFFER_SAMPLES entries
+  volatile uint16_t ringWrite;    // write index
+  volatile uint16_t ringRead;     // read index
+
+  // CIC filter state (ISR-only)
+  int32_t cicY1, cicY2, cicY3;
+  int32_t comb1, comb2, comb3;
+  int8_t  p1lut[256], p2lut[256], p3lut[256];
+  int     cicOutputShift;
+};
+
+// Note: the CIC filter was designed by AI in several iterations to optimize for speed and memory use
+static void _pdmBuildCicTables(PdmIsrState *st) {
+  for (int b = 0; b < 256; b++) {
+    int32_t y1 = 0, y2 = 0, y3 = 0;
+    for (int k = 0; k < 8; k++) {
+      int bit = (b >> (7 - k)) & 1;
+      int32_t x = bit ? 1 : -1;
+      y1 += x; y2 += y1; y3 += y2;
+    }
+    st->p1lut[b] = (int8_t)y1;
+    st->p2lut[b] = (int8_t)y2;
+    st->p3lut[b] = (int8_t)y3;
+  }
+}
+
+static void IRAM_ATTR _pdmCicIntegrateByte(PdmIsrState *st, uint8_t byteVal) {
+  int32_t oldY1 = st->cicY1;
+  int32_t oldY2 = st->cicY2;
+  st->cicY1 = oldY1 + st->p1lut[byteVal];
+  st->cicY2 = oldY2 + (oldY1 << 3) + st->p2lut[byteVal];
+  st->cicY3 = st->cicY3 + oldY1 * 36 + (oldY2 << 3) + st->p3lut[byteVal];
+}
+
+// Decodes one DMA block into the ring buffer
+// each 16bit PDM word is 4 raw bytes: p[0],p[1] in big endian, p[2],p[3] are duplicates of p[0],p[1] (DMA transfer-width padding)
+static void IRAM_ATTR _pdmProcessBlock(PdmIsrState *st, const uint8_t *raw, uint32_t rawBytes) {
+  uint32_t outLen = rawBytes / PDM_RAW_BYTES_PER_SAMPLE;
+  if (outLen > PDM_SAMPLES_PER_BLOCK) outLen = PDM_SAMPLES_PER_BLOCK;  // defensive clamp - DMA block is fixed-size, this should never trigger
+
+  const uint8_t *p = raw;
+  uint32_t wIdx = st->ringWrite;
+  for (uint32_t s = 0; s < outLen; s++) {
+    for (uint32_t i = 0; i < PDM_BYTES_PER_SAMPLE; i += 2) {
+      _pdmCicIntegrateByte(st, p[1]); // bytes in DMA buffer are flipped (big endian)
+      _pdmCicIntegrateByte(st, p[0]);
+      p += 4; // skip the duplicate bytes (DMA transfer always uses 32bit, even for 16bit mono PDM samples: p[2],p[3] are duplicates of p[0],p[1])
+    }
+    int32_t c1 = st->cicY3 - st->comb1; st->comb1 = st->cicY3;
+    int32_t c2 = c1 - st->comb2;        st->comb2 = c1;
+    int32_t c3 = c2 - st->comb3;        st->comb3 = c2;
+
+    int32_t sample = c3 >> st->cicOutputShift;
+    if (sample > 32767) sample = 32767;
+    if (sample < -32768) sample = -32768;
+
+    // Ring buffer overrun oldest unread sample(s) get overwritten
+    st->ring[wIdx & (PDM_RING_BUFFER_SAMPLES - 1)] = (int16_t)sample;
+    wIdx++;
+  }
+  st->ringWrite = wIdx;
+}
+
+static bool IRAM_ATTR _pdmSourceOnRecv(i2s_chan_handle_t handle, i2s_event_data_t *event, void *user_ctx) {
+  (void)handle;
+  PdmIsrState *st = (PdmIsrState *)user_ctx;
+  if ((st == nullptr) || (event == nullptr) || (event->dma_buf == nullptr) || (event->size == 0)) return false;
+  _pdmProcessBlock(st, (const uint8_t *)event->dma_buf, (uint32_t)event->size);
+  return false;
+}
+
+class PDMSource : public AudioSource {
+  public:
+    PDMSource(SRate_t sampleRate, int blockSize, float sampleScale = 1.0f) :
+      AudioSource(sampleRate, blockSize, sampleScale) {}
+
+    ~PDMSource() { deinitialize(); }
+
+    
+    // WS-pin slot is used as the PDM CLK line, the SD-pin slot as the PDM DATA line (same as in standard I2SSource using PDM)
+    void initialize(int8_t i2swsPin = I2S_PIN_NO_CHANGE, int8_t i2ssdPin = I2S_PIN_NO_CHANGE, int8_t = I2S_PIN_NO_CHANGE, int8_t = I2S_PIN_NO_CHANGE) override {
+      DEBUGSR_PRINTLN(F("PDMSource:: initialize()."));
+
+      if ((i2swsPin == I2S_PIN_NO_CHANGE) || (i2ssdPin == I2S_PIN_NO_CHANGE)) {
+        DEBUGSR_PRINTLN(F("AR: PDMSource requires both a CLK (ws) and a DATA (sd) pin."));
+        return;
+      }
+      if (!PinManager::allocatePin(i2swsPin, true, PinOwner::UM_Audioreactive) ||
+          !PinManager::allocatePin(i2ssdPin, false, PinOwner::UM_Audioreactive)) {
+        DEBUGSR_PRINTF("\nAR: Failed to allocate PDM pins: clk=%d, din=%d\n", i2swsPin, i2ssdPin);
+        return;
+      }
+      _ckPin = i2swsPin;
+      _sdPin = i2ssdPin;
+
+      // derive the PDM bit clock from the configured (PCM) sample rate
+      _pdmClockHz = PDM_DECIMATION * (uint32_t)_sampleRate;   // e.g. 64 * 22050 = 1,411,200 Hz
+      static_assert((PDM_DMA_FRAME_NUM * 2) <= 4092, "PDMSource: DMA block exceeds the 4092-byte per-descriptor limit");
+
+      // allocate the ISR state + ring buffer, must be in SRAM for ISR access
+      _st = (PdmIsrState *) heap_caps_calloc(1, sizeof(PdmIsrState), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      if (!_st) {
+        DEBUGSR_PRINTLN(F("AR: PDMSource - out of memory allocating ISR state."));
+        PinManager::deallocatePin(_ckPin, PinOwner::UM_Audioreactive);
+        PinManager::deallocatePin(_sdPin, PinOwner::UM_Audioreactive);
+        _ckPin = _sdPin = I2S_PIN_NO_CHANGE;
+        return;
+      }
+      _st->ring = (int16_t *) heap_caps_malloc(PDM_RING_BUFFER_SAMPLES * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      if (_st->ring == nullptr) {
+        DEBUGSR_PRINTLN(F("AR: PDMSource - out of memory allocating ring buffer/semaphore."));
+        _cleanupFailedInit();
+        return;
+      }
+
+      _pdmBuildCicTables(_st);
+      double gain = pow((double)PDM_DECIMATION, 3.0);          // 3rd-order CIC gain
+      _st->cicOutputShift = (int)ceil(log2(gain)) - 15;        // scale down to 16bit
+      if (_st->cicOutputShift < 0) _st->cicOutputShift = 0;
+
+      // I2S PDM RX channel, raw bitstream format
+      i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
+      chan_cfg.dma_desc_num  = PDM_DMA_DESC_NUM;
+      chan_cfg.dma_frame_num = PDM_DMA_FRAME_NUM;
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 1, 0)
+      chan_cfg.intr_priority = 2;   // matches I2SSource
 #endif
+      esp_err_t err = i2s_new_channel(&chan_cfg, nullptr, &_rx_handle);
+      if (err != ESP_OK) {
+        DEBUGSR_PRINTF("AR: PDMSource - failed to allocate I2S channel: %d\n", err);
+        _cleanupFailedInit();
+        return;
+      }
+
+      i2s_pdm_rx_config_t pdm_cfg = {
+        .clk_cfg  = I2S_PDM_RX_CLK_DEFAULT_CONFIG(_pdmClockHz),  // in RAW format, sample_rate_hz directly sets the PDM bit clock
+        .slot_cfg = I2S_PDM_RX_SLOT_RAW_FMT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+        .gpio_cfg = {
+          .clk = (gpio_num_t)_ckPin,
+          .din = (gpio_num_t)_sdPin,
+          .invert_flags = { .clk_inv = false },
+        },
+      };
+      err = i2s_channel_init_pdm_rx_mode(_rx_handle, &pdm_cfg);
+      if (err != ESP_OK) {
+        DEBUGSR_PRINTF("AR: PDMSource - failed to configure PDM RX: %d\n", err);
+        i2s_del_channel(_rx_handle); _rx_handle = nullptr;
+        _cleanupFailedInit();
+        return;
+      }
+
+      i2s_event_callbacks_t cbs = {
+        .on_recv       = _pdmSourceOnRecv,
+        .on_recv_q_ovf = nullptr,
+        .on_sent       = nullptr,
+        .on_send_q_ovf = nullptr,
+      };
+      err = i2s_channel_register_event_callback(_rx_handle, &cbs, _st);  // _st is a plain MALLOC_CAP_INTERNAL struct - safe user_data
+      if (err != ESP_OK) {
+        DEBUGSR_PRINTF("AR: PDMSource - failed to register I2S callback: %d\n", err);
+        i2s_del_channel(_rx_handle); _rx_handle = nullptr;
+        _cleanupFailedInit();
+        return;
+      }
+
+      err = i2s_channel_enable(_rx_handle);
+      if (err != ESP_OK) {
+        DEBUGSR_PRINTF("AR: PDMSource - failed to enable I2S channel: %d\n", err);
+        i2s_del_channel(_rx_handle); _rx_handle = nullptr;
+        _cleanupFailedInit();
+        return;
+      }
+
+      DEBUGSR_PRINTF("AR: PDMSource - PDM clock %u Hz, %u samples/block, %u sample ring buffer.\n",
+                      (unsigned)_pdmClockHz, (unsigned)PDM_SAMPLES_PER_BLOCK, (unsigned)PDM_RING_BUFFER_SAMPLES);
+      _initialized = true;
+    }
+
+    void deinitialize() override {
+      _initialized = false;
+      if (_rx_handle != nullptr) {
+        i2s_channel_disable(_rx_handle);   // no ISR can fire once disabled - safe to free _st below
+        i2s_del_channel(_rx_handle);
+        _rx_handle = nullptr;
+      }
+      _cleanupState();
+      if (_ckPin != I2S_PIN_NO_CHANGE) { PinManager::deallocatePin(_ckPin, PinOwner::UM_Audioreactive); _ckPin = I2S_PIN_NO_CHANGE; }
+      if (_sdPin != I2S_PIN_NO_CHANGE) { PinManager::deallocatePin(_sdPin, PinOwner::UM_Audioreactive); _sdPin = I2S_PIN_NO_CHANGE; }
+    }
+
+    void getSamples(FFTsampleType *buffer, uint16_t num_samples) override {
+      if (!_initialized || (_st == nullptr)) return;
+
+      if (num_samples > PDM_RING_BUFFER_SAMPLES) {   // defensive clamp - should never happen with WLED's fixed samplesFFT
+        DEBUGSR_PRINTF("AR: PDMSource - requested %u samples > ring buffer capacity %u\n", num_samples, (unsigned)PDM_RING_BUFFER_SAMPLES);
+        num_samples = PDM_RING_BUFFER_SAMPLES;
+      }
+
+      // block until enough samples have been read by DMA & ISR. Note: they should alredy be available when this function is called
+      while ((uint32_t)(_st->ringWrite - _st->ringRead) < num_samples) {
+        delay(1);
+      }
+
+      uint32_t readIdx = _st->ringRead;
+      for (uint16_t i = 0; i < num_samples; i++) {
+        int16_t raw = _st->ring[readIdx & (PDM_RING_BUFFER_SAMPLES - 1)];
+        readIdx++;
+#if !defined(UM_AUDIOREACTIVE_USE_INTEGER_FFT)
+        buffer[i] = (float)raw * _sampleScale;
+#else
+        buffer[i] = raw;   // integer FFT path: no scaling, matches I2SSource's IDF5 integer path
+#endif
+      }
+      _st->ringRead = readIdx;
+    }
+
+  protected:
+    void _cleanupFailedInit() {
+      _cleanupState();
+      if (_ckPin != I2S_PIN_NO_CHANGE) { PinManager::deallocatePin(_ckPin, PinOwner::UM_Audioreactive); _ckPin = I2S_PIN_NO_CHANGE; }
+      if (_sdPin != I2S_PIN_NO_CHANGE) { PinManager::deallocatePin(_sdPin, PinOwner::UM_Audioreactive); _sdPin = I2S_PIN_NO_CHANGE; }
+    }
+
+    void _cleanupState() {
+      if (_st != nullptr) {
+        if (_st->ring != nullptr) heap_caps_free(_st->ring);
+        heap_caps_free(_st);
+        _st = nullptr;
+      }
+    }
+
+    i2s_chan_handle_t _rx_handle = nullptr;
+    uint32_t _pdmClockHz = 0;
+    int8_t   _ckPin = I2S_PIN_NO_CHANGE;
+    int8_t   _sdPin = I2S_PIN_NO_CHANGE;
+    PdmIsrState *_st = nullptr;
+};
+#endif // AR_PDM_SW_DECODE_SUPPORTED
+#endif // ARDUINO_ARCH_ESP32

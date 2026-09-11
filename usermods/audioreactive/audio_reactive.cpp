@@ -1394,6 +1394,8 @@ class AudioReactive : public Usermod {
 
       #if defined(CONFIG_IDF_TARGET_ESP32) || defined(CONFIG_IDF_TARGET_ESP32S3)  // PDM is only supported on S3 and classic esp32
         if ((i2sckPin == I2S_PIN_NO_CHANGE) && (i2ssdPin >= 0) && (i2swsPin >= 0) && ((dmType == 1) || (dmType == 4)) ) dmType = 5;   // dummy user support: SCK == -1 --means--> PDM microphone
+      #elif defined(AR_PDM_SW_DECODE_SUPPORTED)  // e.g. ESP32-C3: no hardware PDM->PCM decimator - PDM is decoded in software instead
+        if ((i2sckPin == I2S_PIN_NO_CHANGE) && (i2ssdPin >= 0) && (i2swsPin >= 0) && ((dmType == 1) || (dmType == 4)) ) dmType = 7;   // dummy user support: SCK == -1 --means--> PDM microphone (software-decoded)
       #endif
 
       switch (dmType) {
@@ -1403,6 +1405,9 @@ class AudioReactive : public Usermod {
       #endif
       #if !defined(CONFIG_IDF_TARGET_ESP32) && !defined(CONFIG_IDF_TARGET_ESP32S3)  // PDM is only supported on S3 and classic esp32
         case 5:  //PDM Microphone
+      #endif
+      #if !defined(AR_PDM_SW_DECODE_SUPPORTED)  // software-decoded PDM not available on this MCU/IDF version
+        case 7:  //PDM Microphone (software-decoded)
       #endif
         case 1:
           DEBUGSR_PRINT(F("AR: Generic I2S Microphone - ")); DEBUGSR_PRINTLN(F(I2S_MIC_CHANNEL_TEXT));
@@ -1434,6 +1439,15 @@ class AudioReactive : public Usermod {
           DEBUGSR_PRINT(F("AR: Generic PDM Microphone - ")); DEBUGSR_PRINTLN(F(I2S_PDM_MIC_CHANNEL_TEXT));
           audioSource = new I2SSource(SAMPLE_RATE, BLOCK_SIZE, 1.0f/4.0f);
           useBandPassFilter = true;  // this reduces the noise floor on SPM1423 from 5% Vpp (~380) down to 0.05% Vpp (~5)
+          delay(100);
+          if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin);
+          break;
+        #endif
+        #if defined(AR_PDM_SW_DECODE_SUPPORTED)  // e.g. ESP32-C3: no hardware PDM->PCM decimator - decode PDM in software instead
+        case 7:
+          DEBUGSR_PRINT(F("AR: PDM Microphone (software-decoded) - ")); DEBUGSR_PRINTLN(F(I2S_PDM_MIC_CHANNEL_TEXT));
+          audioSource = new PDMSource(SAMPLE_RATE, BLOCK_SIZE, 1.0f/4.0f);
+          useBandPassFilter = true;  // matches "Generic PDM": reduces noise floor on digital PDM mics
           delay(100);
           if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin);
           break;
@@ -1860,6 +1874,7 @@ class AudioReactive : public Usermod {
               infoArr.add(F("ADC analog"));
             } else {
               if (dmType == 5) infoArr.add(F("PDM digital")); // dmType 5 => generic PDM microphone
+              else if (dmType == 7) infoArr.add(F("PDM digital (SW decode)")); // dmType 7 => software-decoded PDM microphone
               else infoArr.add(F("I2S digital"));
             }
             // input level or "silence"
@@ -2108,6 +2123,9 @@ class AudioReactive : public Usermod {
     #if !defined(CONFIG_IDF_TARGET_ESP32) && !defined(CONFIG_IDF_TARGET_ESP32S3)  // PDM is only supported on S3 and classic esp32
       if (dmType == 5) dmType = SR_DMTYPE;   // MCU does not support PDM
     #endif
+    #if !defined(AR_PDM_SW_DECODE_SUPPORTED)  // software-decoded PDM not available on this MCU/IDF version
+      if (dmType == 7) dmType = SR_DMTYPE;   // MCU does not support software-decoded PDM
+    #endif
 
       configComplete &= getJsonValue(top[FPSTR(_digitalmic)]["pin"][0], i2ssdPin);
       configComplete &= getJsonValue(top[FPSTR(_digitalmic)]["pin"][1], i2swsPin);
@@ -2160,6 +2178,9 @@ class AudioReactive : public Usermod {
       uiScript.print(F("addOption(dd,'Generic I2S with Mclk',4);"));
     #if defined(CONFIG_IDF_TARGET_ESP32) || defined(CONFIG_IDF_TARGET_ESP32S3)  // PDM is only supported on S3 and classic esp32
       uiScript.print(F("addOption(dd,'Generic PDM',5);"));
+    #endif
+    #if defined(AR_PDM_SW_DECODE_SUPPORTED)  // e.g. ESP32-C3: no hardware PDM->PCM decimator - PDM is decoded in software instead
+      uiScript.print(F("addOption(dd,'PDM (software decode)',7);"));
     #endif
     uiScript.print(F("addOption(dd,'ES8388',6);"));
       uiScript.print(F("addOption(dd,'None - network receive only',"));
