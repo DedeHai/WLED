@@ -227,7 +227,13 @@ BusDigital::BusDigital(const BusConfig &bc)
 // to disable brightness limiter for a bus, set LED current to 0
 
 void BusDigital::setBrightness(uint8_t b) {
-  _bri = b;
+  setBrightness16((uint16_t)b << 8);
+}
+
+void BusDigital::setBrightness16(uint16_t b) {
+  if (b > (255U << 8)) b = 255U << 8;
+  _bri16 = b;
+  _bri = b >> 8;
   if (!_busPtr) return;
   if (_type == TYPE_TM1814 || _type == TYPE_TM1815) {
     // coarse brightness via per-strip hardware drive current (64 steps), 0 is 6.5mA, 63 is 38mA
@@ -244,6 +250,7 @@ void BusDigital::setBrightness(uint8_t b) {
     // residual applied via color_fade() in setPixelColor().
     uint8_t hwStep, residualBri;
     WLEDpixelBus::mapBrightnessToCurrentStep(b, 31, 8, hwStep, residualBri);
+    WLEDpixelBus::applyApa102ResidualCorrection(residualBri);
     _busPtr->setApa102HwBri(hwStep + 1); // 0 is off so use 1..31
     _busPtr->setBusBri(residualBri);     // used by color_fade() in setPixelColor()
   } else if (is16bit()) {
@@ -252,7 +259,7 @@ void BusDigital::setBrightness(uint8_t b) {
     _busPtr->setBusBri(255);
     _busPtr->setEncBri(b);
   } else {
-    _busPtr->setBusBri(b);                // used by color_fade() in setPixelColor()
+    _busPtr->setBusBri(_bri);             // used by color_fade() in setPixelColor()
   }
 }
 
@@ -269,7 +276,7 @@ void BusDigital::estimateCurrent() {
   // Scale colorSum back to the full _bri level so ABL sees the correct hardware power draw.
   if (_type == TYPE_TM1814 || _type == TYPE_TM1815 || _type == TYPE_APA102) {
     const uint8_t busBri = _busPtr->getBusBri();
-    if (busBri > 0) colorSum = ((uint64_t)colorSum * _bri) / busBri;
+    if (busBri > 0) colorSum = ((uint64_t)colorSum * _bri16) / ((uint32_t)busBri << 8);
   }
   // colorSum has all the values of color channels summed, max would be getLength()*(3*255 + (255 if hasWhite()): convert to milliAmps
   uint32_t clrUnitsPerChannel = hasWhite() ? 4*255 : 3*255;
@@ -606,13 +613,13 @@ void BusPwm::show() {
 #endif
   // use CIE brightness formula (linear + cubic) to approximate human eye perceived brightness
   // see: https://en.wikipedia.org/wiki/Lightness
-  unsigned pwmBri = _bri;
-  if (pwmBri < 21) {                                   // linear response for values [0-20]
-    pwmBri = (pwmBri * maxBri + 2300 / 2) / 2300 ;     // adding '0.5' before division for correct rounding, 2300 gives a good match to CIE curve
+  const float briFloat = float(_bri16) / 256.0f;
+  float pwmBri = briFloat;
+  if (pwmBri < 21.0f) {                                 // linear response for values [0-20]
+    pwmBri = pwmBri * maxBri / 2300.0f;                 // 2300 gives a good match to CIE curve
   } else {                                             // cubic response for values [21-255]
-    float temp = float(pwmBri + 41) / float(255 + 41); // 41 is to match offset & slope to linear part
-    temp = temp * temp * temp * (float)maxBri;
-    pwmBri = (unsigned)temp;                           // pwmBri is in range [0-maxBri] C
+    float temp = (pwmBri + 41.0f) / (255.0f + 41.0f);   // 41 is to match offset & slope to linear part
+    pwmBri = temp * temp * temp * maxBri;
   }
 
   [[maybe_unused]] unsigned hPoint = 0;  // phase shift (0 - maxBri)
@@ -623,14 +630,14 @@ void BusPwm::show() {
   // Phase shifting requires that LEDC timers are synchronised (see setup()). For PWM CCT (and H-bridge) it is
   // also mandatory that both channels use the same timer (pinManager takes care of that).
   for (unsigned i = 0; i < numPins; i++) {
-    unsigned duty = (_data[i] * pwmBri) / 255;
+    unsigned duty = (_data[i] * pwmBri) / 255.0f;
     unsigned deadTime = 0;
 
     if (_type == TYPE_ANALOG_2CH && Bus::_cctBlend <= 0) {
       // add dead time between signals (when using dithering, two full 8bit pulses are required)
       deadTime = (1+dithering) << bitShift;
       // we only need to take care of shortening the signal at (almost) full brightness otherwise pulses may overlap
-      if (_bri >= 254 && duty >= maxBri / 2 && duty < maxBri) {
+      if (briFloat >= 254.0f && duty >= maxBri / 2 && duty < maxBri) {
         duty -= deadTime << 1; // shorten duty of larger signal except if full on
       }
     }

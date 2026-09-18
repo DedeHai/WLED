@@ -616,6 +616,8 @@ WLED_GLOBAL byte bri                 _INIT(briS);          // global brightness 
 WLED_GLOBAL byte briOld              _INIT(0);             // global brightness while in transition loop (previous iteration)
 WLED_GLOBAL byte briT                _INIT(0);             // global brightness during transition
 WLED_GLOBAL byte briLast             _INIT(128);           // brightness before turned off. Used for toggle function
+WLED_GLOBAL uint16_t briOld16        _INIT(0);             // internal Q8.8 brightness at transition start
+WLED_GLOBAL uint16_t briT16          _INIT(0);             // internal Q8.8 brightness during transition
 // whiteLast is private to ir.cpp - see there.
 
 // button

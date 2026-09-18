@@ -876,6 +876,7 @@ class WS2812FX {
       service(),                                  // executes effect functions when due and calls strip.show()
       setCCT(uint16_t k),                         // sets global CCT (either in relative 0-255 value or in K)
       setBrightness(uint8_t b, bool direct = false),    // sets strip brightness
+      setBrightness16(uint16_t b, bool direct = false),  // sets internal Q8.8 strip brightness
       setRange(uint16_t i, uint16_t i2, uint32_t col),  // used for clock overlay
       purgeSegments(),                            // removes inactive segments from RAM (may incure penalty and memory fragmentation but reduces vector footprint)
       setMainSegmentId(unsigned n = 0),

@@ -237,18 +237,18 @@ public:
   // Fast encode — 16-bit types (UCS8903 / UCS8904 / SM16825)
   // -------------------------------------------------------------------------
 
-  inline void encodeRGB16(uint32_t c, uint8_t* out, uint8_t bri) const {
+  inline void encodeRGB16(uint32_t c, uint8_t* out, uint16_t bri) const {
     writeU16(out, _idxR, getR(c), bri);
     writeU16(out, _idxG, getG(c), bri);
     writeU16(out, _idxB, getB(c), bri);
   }
-  inline void encodeRGBW16(uint32_t c, uint8_t* out, uint8_t bri) const {
+  inline void encodeRGBW16(uint32_t c, uint8_t* out, uint16_t bri) const {
     writeU16(out, _idxR, getR(c), bri);
     writeU16(out, _idxG, getG(c), bri);
     writeU16(out, _idxB, getB(c), bri);
     writeU16(out, _idxW, getW(c), bri);
   }
-  inline void encodeCCT16(uint32_t c, const CctPixel& cct, uint8_t* out, uint8_t bri) const {
+  inline void encodeCCT16(uint32_t c, const CctPixel& cct, uint8_t* out, uint16_t bri) const {
     writeU16(out, _idxR,  getR(c), bri);
     writeU16(out, _idxG,  getG(c), bri);
     writeU16(out, _idxB,  getB(c), bri);
@@ -289,7 +289,7 @@ public:
   // (and any 16-bit + invert combination); defined in WLEDpixelBus.cpp
   // -------------------------------------------------------------------------
 
-  void     encodeGeneric(uint32_t c, const CctPixel& cct, uint8_t* out, uint8_t bri) const;
+  void     encodeGeneric(uint32_t c, const CctPixel& cct, uint8_t* out, uint16_t bri) const;
   uint32_t decodeGeneric(const uint8_t* in) const;
 
   // Accessors
@@ -306,8 +306,8 @@ private:
   uint8_t _channelMap[MAX_CUSTOM_CHANNELS]; // custom channel map: _channelMap[i] = ChannelSource for wire byte i
 
   // 16bit pixel helper functions
-  static inline void writeU16(uint8_t* out, uint8_t idx, uint8_t val8, uint8_t bri) {
-    const uint16_t v = (uint16_t)val8 * bri;
+  static inline void writeU16(uint8_t* out, uint8_t idx, uint8_t val8, uint16_t bri) {
+    const uint16_t v = ((uint32_t)val8 * bri) >> 8;
     out[idx*2]   = v >> 8;
     out[idx*2+1] = v & 0xFF;
   }
@@ -330,9 +330,8 @@ protected:
   uint8_t  _suffixLen = 0;            // byte length of chip suffix appended after pixel data
   bool     _inverted  = false;        // physical output signal inversion (polarity)
   uint8_t  _busBri = 255;  // brightness for color_fade() in setPixelColor(): _bri for 8-bit types,
-                           // fine residual for TM1814/TM1815, 255 (no-op) for 16-bit types
-  uint8_t  _encBri = 255;  // encoder brightness for 16-bit types (SM16825/UCS8903/UCS8904):
-                           // applied as channel*_encBri for full 16-bit wire precision; 255 for 8-bit
+                           // fine residual for TM1814/TM1815/APA102, 255 (no-op) for 16-bit types
+  uint16_t _encBri = 255U << 8; // Q8.8 encoder brightness for 16-bit types
 
 public:
   virtual ~PixelBus() {
@@ -368,7 +367,7 @@ public:
    * @param b  brightness 0–255
    */
   void setBusBri(uint8_t b) { _busBri = b; } // TODO: brightness scaling/parameters may need some refinement
-  void setEncBri(uint8_t b) { _encBri = b; }
+  void setEncBri(uint16_t b) { _encBri = b; }
   inline uint8_t getBusBri() const { return _busBri; }
 
   /**

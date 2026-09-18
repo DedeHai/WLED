@@ -62,13 +62,20 @@ byte scaledBri(byte in)
   return (byte)val;
 }
 
+uint16_t scaledBri16(uint16_t in)
+{
+  uint32_t val = ((uint32_t)in*briMultiplier)/100;
+  if (val > (255U << 8)) val = 255U << 8;
+  return (uint16_t)val;
+}
+
 
 //applies global temporary brightness (briT) to strip
 void applyBri() {
   if (realtimeOverride || !(realtimeMode && arlsForceMaxBri))
   {
     //DEBUG_PRINTF_P(PSTR("Applying strip brightness: %d (%d,%d)\n"), (int)briT, (int)bri, (int)briOld);
-    strip.setBrightness(briT);
+    strip.setBrightness16(briT16, false);
   }
 }
 
@@ -77,6 +84,8 @@ void applyBri() {
 void applyFinalBri() {
   briOld = bri;
   briT = bri;
+  briOld16 = (uint16_t)bri << 8;
+  briT16 = briOld16;
   applyBri();
   strip.trigger(); // force one last update
 }
@@ -129,6 +138,7 @@ void stateUpdated(byte callMode) {
   } else {
     if (transitionActive) {
       briOld = briT;
+      briOld16 = briT16;
     } else if (bri != briOld || stateChanged)
       strip.setTransitionMode(true); // force all segments to transition mode
     transitionActive = true;
@@ -175,10 +185,11 @@ void handleTransitions() {
       applyFinalBri();
       return;
     }
-    byte briTO = briT;
-    int deltaBri = (int)bri - (int)briOld;
-    briT = briOld + (deltaBri * ti / tr);
-    if (briTO != briT) applyBri();
+    uint16_t briTO16 = briT16;
+    int32_t deltaBri16 = (int32_t)((uint16_t)bri << 8) - (int32_t)briOld16;
+    briT16 = (uint16_t)((int32_t)briOld16 + ((int64_t)deltaBri16 * ti / tr));
+    briT = briT16 >> 8;
+    if (briTO16 != briT16) applyBri();
   }
 }
 

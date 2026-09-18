@@ -134,7 +134,7 @@ ColorEncoder::ColorEncoder(const uint8_t channelMap[MAX_CUSTOM_CHANNELS], uint8_
 
 // Generic encoder for non-fast-path cases: NCHF_INVERT, NCHF_CUSTOM,
 // and any 16-bit + invert combination.
-void ColorEncoder::encodeGeneric(uint32_t c, const CctPixel& cct, uint8_t* out, uint8_t bri) const {
+void ColorEncoder::encodeGeneric(uint32_t c, const CctPixel& cct, uint8_t* out, uint16_t bri) const {
   const uint8_t flags = _pixelFormat & 0xF0;
   const uint8_t logCh = _pixelFormat & 0x0F;
 

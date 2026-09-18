@@ -33,6 +33,10 @@ static constexpr uint8_t TM1914_PREFIX[6] = { 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00
 
 
 namespace WLEDpixelBus {
+
+// APA102 residual calibration: 0 preserves the uncalibrated residual,
+static constexpr int8_t APA102_RESIDUAL_CORRECTION = 5;
+
 /**
  * Map a WLED brightness value (0..255) to a hardware current step and a residual
  * color scale, maximising effective resolution for chips with discrete current levels.
@@ -43,7 +47,7 @@ namespace WLEDpixelBus {
  *
  * All arithmetic is integer (Q16.8 fixed-point)
  *
- * @param brightness  Target brightness 0..255.
+ * @param brightness  Target brightness in Q8.8 format (0..255<<8).
  * @param numSteps    Number of discrete current levels the chip supports (e.g. 64).
  * @param minBri      Brightness equivalent of the minimum current step (e.g. 44 for
  *                    TM1814: floor(6.5/38 * 255)). Below this floor, step 0 is used
@@ -51,34 +55,46 @@ namespace WLEDpixelBus {
  * @param stepOut     Output: current step to program into the chip (0..numSteps-1).
  * @param scaleOut    Output: color scale to apply to pixel data (0..255; 255 = no change).
  */
-inline void mapBrightnessToCurrentStep(uint8_t brightness, uint8_t numSteps, uint8_t minBri, uint8_t& stepOut, uint8_t& scaleOut) {
+ // TODO: make this a regular function no need to inline as it is not in the hot path
+inline void mapBrightnessToCurrentStep(uint16_t brightness, uint8_t numSteps, uint8_t minBri, uint8_t& stepOut, uint8_t& scaleOut) {
   if (brightness == 0 || numSteps == 0) {
     stepOut = 0; scaleOut = 0;
     return;
   }
 
   const uint8_t maxStep = numSteps - 1;
-  // Q16.8 step size: (255 - minBri) / maxStep
-  const uint32_t range   = 255 - minBri;
-  const uint32_t stepFP  = (range << 8) / maxStep;  // Q16.8
+  const uint32_t minBriFP = (uint32_t)minBri << 8;
+  const uint32_t maxBriFP = 255U << 8;
+  const uint32_t range = maxBriFP - minBriFP;
+  const uint32_t stepFP = range / maxStep;
 
-  if (brightness <= minBri) {
+  if (brightness <= minBriFP) {
     // Below minimum current floor: use step 0, scale colors down proportionally.
     stepOut  = 0;
-    scaleOut = ((uint16_t)brightness * 255) / minBri;
-    return;
+    scaleOut = ((uint32_t)brightness * 255) / minBriFP;
+  } else {
+    // Compute ceiling step: smallest step whose brightness >= target.
+    const uint32_t diffFP = brightness - minBriFP;
+    uint32_t step = (diffFP + stepFP - 1) / stepFP;
+    if (step > maxStep) step = maxStep;
+
+    // Actual brightness at this step (integer floor, guaranteed >= brightness).
+    const uint32_t curBri = minBriFP + (step * range) / maxStep;
+
+    stepOut  = (uint8_t)step;
+    scaleOut = (uint8_t)(((uint32_t)brightness * 255) / curBri);  // always <= 255
   }
 
-  // Compute ceiling step: smallest step whose brightness >= target.
-  const uint32_t diffFP = (uint32_t)(brightness - minBri) << 8;  // Q16.8
-  uint32_t step = (diffFP + stepFP - 1) / stepFP;                 // ceiling division
-  if (step > maxStep) step = maxStep;
+}
 
-  // Actual brightness at this step (integer floor, guaranteed >= brightness).
-  const uint32_t curBri = minBri + (step * range) / maxStep;
-
-  stepOut  = (uint8_t)step;
-  scaleOut = (uint8_t)(((uint16_t)brightness * 255) / curBri);  // always <= 255
+// Adjust the residual around the current-step point (i.e. correct the brightness as saw-tooth function to eliminate brightness steps)
+inline void applyApa102ResidualCorrection(uint8_t& scaleOut) {
+  if (scaleOut == 0 || APA102_RESIDUAL_CORRECTION == 0) return;
+  const int32_t adjustment = ((255 - scaleOut) * (int32_t)APA102_RESIDUAL_CORRECTION) >> 7;
+  int32_t correctedScale = (int32_t)scaleOut + adjustment;
+  if (correctedScale < 0) correctedScale = 0;
+  if (correctedScale > 255) correctedScale = 255;
+  scaleOut = (uint8_t)correctedScale;
 }
 
 // Pad pixelBytes up to a whole number of native LED-IC channels if the bus has a suffix to make sure it alignes

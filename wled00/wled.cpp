@@ -44,6 +44,7 @@ WLED::WLED()
 void WLED::reset()
 {
   briT = 0;
+  briT16 = 0;
   #ifdef WLED_ENABLE_WEBSOCKETS
   ws.closeAll(1012);
   #endif

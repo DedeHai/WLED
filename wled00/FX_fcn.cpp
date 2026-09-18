@@ -1960,6 +1960,25 @@ void WS2812FX::setBrightness(uint8_t b, bool direct) {
   }
 }
 
+void WS2812FX::setBrightness16(uint16_t b, bool direct) {
+  if (b > (255U << 8)) b = 255U << 8;
+  const uint8_t legacyBri = b >> 8;
+  const bool changed = _brightness != legacyBri || b != ((uint16_t)legacyBri << 8);
+  if (!changed) {
+    BusManager::setBrightness16(scaledBri16(b));
+    return;
+  }
+  _brightness = legacyBri;
+  if (_brightness == 0) { //unfreeze all segments on power off
+    for (const Segment &seg : _segments) seg.freeze = false; // freeze is mutable
+  }
+  BusManager::setBrightness16(scaledBri16(b));
+  if (!direct) {
+    unsigned long t = millis();
+    if (t - _lastShow > min(_frametime, uint16_t(FRAMETIME_FIXED))) trigger(); //apply brightness change immediately, but don't speed up above 42fps
+  }
+}
+
 uint8_t WS2812FX::getActiveSegsLightCapabilities(bool selectedOnly) const {
   uint8_t totalLC = 0;
   for (const Segment &seg : _segments) {
