@@ -421,7 +421,7 @@ void realtimeLock(uint32_t timeoutMs, byte md)
       strip.fill(BLACK);
     }
     // if strip is off (bri==0) and not already in RTM
-    if (briT == 0) {
+    if (briT16 == 0) {
       strip.setBrightness(briLast, true);
     }
   }
@@ -430,10 +430,15 @@ void realtimeLock(uint32_t timeoutMs, byte md)
     realtimeTimeout = (timeoutMs == 255001 || timeoutMs == 65000) ? UINT32_MAX : millis() + timeoutMs;
   }
   realtimeMode = md;
+  // switch gamma table to unity when realtime mode disables gamma correction, restore otherwise
+  if (arlsDisableGammaCorrection && md != REALTIME_MODE_INACTIVE)
+    NeoGammaWLEDMethod::calcGammaTable(1.0f);
+  else
+    NeoGammaWLEDMethod::calcGammaTable(gammaCorrectVal);
 
   if (realtimeOverride) return;
   if (arlsForceMaxBri) strip.setBrightness(255, true);
-  if (briT > 0 && md == REALTIME_MODE_GENERIC) strip.show();
+  if (briT16 > 0 && md == REALTIME_MODE_GENERIC) strip.show();
 }
 
 void exitRealtime() {
@@ -441,6 +446,7 @@ void exitRealtime() {
   if (realtimeOverride == REALTIME_OVERRIDE_ONCE) realtimeOverride = REALTIME_OVERRIDE_NONE;
   realtimeTimeout = 0; // cancel realtime mode immediately
   realtimeMode = REALTIME_MODE_INACTIVE; // inform UI immediately
+  NeoGammaWLEDMethod::calcGammaTable(gammaCorrectVal); // restore gamma table after realtime mode
   strip.setBrightness(bri, true);
   realtimeIP[0] = 0;
   if (useMainSegmentOnly) { // unfreeze live segment again
