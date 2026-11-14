@@ -233,7 +233,6 @@ bool Esp8266DmaBus::allocateEncodeBuffer(uint16_t numPixels, uint8_t bytesPerPix
   const size_t prefixBytes = (size_t)_prefixLen * 4;
   const size_t pixelBytes = sourcePixelBytes * 4;
   const size_t suffixBytes = (size_t)_suffixLen * 4;
-  if (prefixBytes > maxSize - pixelBytes || suffixBytes > maxSize - prefixBytes - pixelBytes) return false;
   const size_t needed = prefixBytes + pixelBytes + suffixBytes;
   if (_encodeBuffer && _encodeBufferSize >= needed) return true;
   releaseEncodeBuffer();
