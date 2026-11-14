@@ -485,6 +485,7 @@ public:
 
   // Allocate encode buffer (data sent to the LEDs)
   virtual bool allocateEncodeBuffer(uint16_t numPixels, uint8_t bytesPerPixel) {
+    if ((_prefixLen || _suffixLen) && !_framingData) return false;
     const size_t pixelBytes = (size_t)numPixels * bytesPerPixel;
     const size_t needed = _prefixLen + pixelBytes + _suffixLen;
     if (_encodeBuffer && _encodeBufferSize >= needed) return true;

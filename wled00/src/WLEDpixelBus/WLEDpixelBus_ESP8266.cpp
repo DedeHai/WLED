@@ -227,6 +227,7 @@ Esp8266DmaBus::~Esp8266DmaBus() {
 }
 
 bool Esp8266DmaBus::allocateEncodeBuffer(uint16_t numPixels, uint8_t bytesPerPixel) {
+  if ((_prefixLen || _suffixLen) && !_framingData) return false;
   // 4-step I2S encoding: each source byte → 4 encoded bytes
   const size_t sourcePixelBytes = (size_t)numPixels * bytesPerPixel;
   const size_t prefixBytes = (size_t)_prefixLen * 4;
