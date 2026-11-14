@@ -58,7 +58,8 @@ static inline uint8_t getTimingIndex(uint8_t wledType) {
     case TYPE_WS2811_400KHZ: return  1;
     case TYPE_TM1829:        return  2;
     case TYPE_UCS8903:
-    case TYPE_UCS8904:       return  3; // identical timing
+    case TYPE_UCS8904:
+    case TYPE_UCS7604:       return  3; // identical 800 kHz timing
     case TYPE_APA106:        return  4;
     case TYPE_TM1914:
     case TYPE_TM1814:        return  5; // identical timing
