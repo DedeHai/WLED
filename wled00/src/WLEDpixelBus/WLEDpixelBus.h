@@ -346,7 +346,7 @@ public:
     free(_framingData); // free old data
     _framingData = nullptr;
     if (framingBytes) {
-      framingData = (uint8_t*)calloc(framingBytes);
+      framingData = (uint8_t*)calloc(framingBytes, sizeof(uint8_t));
       if (!framingData) return false;
       if (prefixData && prefixLen) memcpy(framingData, prefixData, prefixLen);
       if (suffixData && suffixLen) memcpy(framingData + prefixLen, suffixData, suffixLen);
