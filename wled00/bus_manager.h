@@ -100,6 +100,57 @@ typedef struct {
   const char *name;
 } LEDType;
 
+//parent class of BusDigital, BusPwm, and BusNetwork
+static constexpr uint8_t  PHYS_SEG_BLACK   = 254;
+static constexpr uint8_t  PHYS_SEG_COMPOSE = 255;
+static constexpr uint32_t PHYS_FLAG_2D     = 0x80000000u;
+
+struct PullPixelContext {
+  const uint32_t* const* segPixels;
+  const uint8_t*         segOpacity;
+  const uint8_t*         segCCT;
+  uint8_t                numActive;
+  bool                   uniformCCT;
+  bool                   correctWB;
+  bool                   cctFromRgb;
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+  const uint32_t*        physMap;
+  uint16_t               physMapLen;
+#else
+  const uint16_t*        invMap;
+  uint16_t               invMapLen;
+#endif
+  uint32_t (*composeSlow)(const void* fxPtr, uint32_t logOrXY, bool is2DXY, uint8_t &outCCT);
+  const void* fxPtr;
+
+  inline uint32_t pullPixel(uint16_t globalPix, uint8_t &outCCT) const {
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+    if (globalPix < physMapLen) {
+      const uint32_t entry = physMap[globalPix];
+      const uint8_t segIdx = (uint8_t)(entry >> 16);
+      if (segIdx < PHYS_SEG_BLACK) {
+        uint32_t c = segPixels[segIdx][entry & 0xFFFFu];
+        const uint8_t op = segOpacity[segIdx];
+        if (op == 0) c = 0;
+        else if (op < 255) {
+          const uint8_t sc = (uint8_t)(op + 1);
+          c = ((((c & 0x00FF00FFu) * sc) >> 8) & 0x00FF00FFu) | ((((c >> 8) & 0x00FF00FFu) * sc) & ~0x00FF00FFu);
+        }
+        outCCT = segCCT[segIdx];
+        return c;
+      }
+      if (segIdx == PHYS_SEG_COMPOSE) {
+        return composeSlow(fxPtr, entry & 0xFFFFu, (entry & PHYS_FLAG_2D) != 0, outCCT);
+      }
+    }
+    return 0;
+#else
+    const uint16_t logIdx = invMap ? (globalPix < invMapLen ? invMap[globalPix] : 0xFFFFu) : globalPix;
+    if (logIdx == 0xFFFFu) return 0;
+    return composeSlow(fxPtr, logIdx, false, outCCT);
+#endif
+  }
+};
 
 //parent class of BusDigital, BusPwm, and BusNetwork
 class Bus {
@@ -125,6 +176,7 @@ class Bus {
     virtual void     clearPixels()                              {} // zero encode buffer to black (no-op for non-digital buses)
     virtual void     setStatusPixel(uint32_t c)                 {}
     virtual void     setPixelColor(unsigned pix, uint32_t c)    = 0;
+    virtual void     updateFromBuffer(const PullPixelContext &ctx);
     virtual void     setBrightness(uint8_t b)                   { setBrightness16((uint16_t)b << 8); };
     virtual void     setBrightness16(uint16_t b)                { _bri16 = b; };
     virtual void     setColorOrder(uint8_t co)                  {}
@@ -241,6 +293,7 @@ class BusDigital : public Bus {
     void clearPixels() override;
     void setStatusPixel(uint32_t c) override;
     [[gnu::hot]] void setPixelColor(unsigned pix, uint32_t c) override;
+  [[gnu::hot]] void updateFromBuffer(const PullPixelContext &ctx) override;
     void setColorOrder(uint8_t colorOrder) override;
     [[gnu::hot]] uint32_t getPixelColor(unsigned pix) const override;
     uint8_t  getColorOrder() const override  { return _colorOrder; }
@@ -373,6 +426,7 @@ class BusPlaceholder : public Bus {
 
     // Actual calls are stubbed out
     void setPixelColor(unsigned pix, uint32_t c) override {};
+    void updateFromBuffer(const PullPixelContext &ctx) override {};
     void show() override {};
 
     // Accessors
@@ -483,6 +537,7 @@ namespace BusManager {
 
   void updateGammaUse(bool forceTableUpdate = false);
   [[gnu::hot]] void     setPixelColor(unsigned pix, uint32_t c);
+  [[gnu::hot]] void updateFromBuffer(const PullPixelContext &ctx);
   [[gnu::hot]] uint32_t getPixelColor(unsigned pix);
   void        clearPixels(size_t n); // zero all bus encode buffers for first n physical pixels
   void        show();

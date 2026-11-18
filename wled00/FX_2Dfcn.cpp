@@ -46,21 +46,37 @@ void WS2812FX::setUpMatrix() {
       return;
     }
 
-    customMappingSize = 0; // prevent use of mapping if anything goes wrong
+    _logicalLength = Segment::maxWidth * Segment::maxHeight;
+    if (_length > _logicalLength) _logicalLength = _length;
+    _hasPanelGaps = false;
+    _hasCustomFileMap = false;
 
     d_free(customMappingTable);
-    // Segment::maxWidth and Segment::maxHeight are set according to panel layout
-    // and the product will include at least all leds in matrix
-    // if actual LEDs are more, getLengthTotal() will return correct number of LEDs
-    customMappingTable = static_cast<uint16_t*>(d_malloc(sizeof(uint16_t)*getLengthTotal())); // prefer to not use SPI RAM
+    customMappingTable = nullptr;
+    customMappingSize = 0;
+    d_free(_invMappingTable);
+    _invMappingTable = nullptr;
+    _invMappingSize = 0;
 
-    if (customMappingTable) {
-      customMappingSize = getLengthTotal();
+    unsigned matrixSize = Segment::maxWidth * Segment::maxHeight;
+    char fileName[32]; strcpy_P(fileName, PSTR("/2d-gaps.json"));
+    bool isFile = WLED_FS.exists(fileName);
 
-      // fill with empty in case we don't fill the entire matrix
-      unsigned matrixSize = Segment::maxWidth * Segment::maxHeight;
-      for (unsigned i = 0; i<matrixSize; i++) customMappingTable[i] = 0xFFFFU;
-      for (unsigned i = matrixSize; i<getLengthTotal(); i++) customMappingTable[i] = i; // trailing LEDs for ledmap (after matrix) if it exist
+    // Only allocate _invMappingTable here if ESP8266 no-buffer mode or /2d-gaps.json is present.
+    // Pure panel[] setups on _physMap builds compute phys<->log directly from panel[] with 0 mapping RAM.
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+    if (!isFile) {
+      _physMapHash = 0; // pure panel[] math needs no _invMappingTable
+      return;
+    }
+#endif
+    _invMappingTable = static_cast<uint16_t*>(d_malloc(sizeof(uint16_t) * _length)); // prefer DRAM for speed
+
+    if (_invMappingTable) {
+      _invMappingSize = _length;
+      for (unsigned i = 0; i < _length; i++) {
+        _invMappingTable[i] = (i >= matrixSize) ? (uint16_t)i : 0xFFFFU;
+      }
 
       // we will try to load a "gap" array (a JSON file)
       // the array has to have the same amount of values as mapping array (or larger)
@@ -69,8 +85,6 @@ void WS2812FX::setUpMatrix() {
       // content of the file is just raw JSON array in the form of [val1,val2,val3,...]
       // there are no other "key":"value" pairs in it
       // allowed values are: -1 (missing pixel/no LED attached), 0 (inactive/unused pixel), 1 (active/used pixel)
-      char    fileName[32]; strcpy_P(fileName, PSTR("/2d-gaps.json"));
-      bool    isFile = WLED_FS.exists(fileName);
       int8_t *gapTable = nullptr;
 
       if (isFile) {
@@ -110,7 +124,8 @@ void WS2812FX::setUpMatrix() {
             x = (p.vertical?p.bottomStart:p.rightStart) ? h-i-1 : i;
             x = p.serpentine && j%2 ? h-x-1 : x;
             size_t index = (p.yOffset + (p.vertical?x:y)) * Segment::maxWidth + p.xOffset + (p.vertical?y:x);
-            if (!gapTable || (gapTable && gapTable[index] >  0)) customMappingTable[index] = pix; // a useful pixel (otherwise -1 is retained)
+            if (gapTable) _hasPanelGaps = true;
+            if ((!gapTable || gapTable[index] > 0) && pix < _invMappingSize) _invMappingTable[pix] = (uint16_t)index;
             if (!gapTable || (gapTable && gapTable[index] >= 0)) pix++; // not a missing pixel
           }
         }
@@ -120,10 +135,10 @@ void WS2812FX::setUpMatrix() {
       p_free(gapTable);
 
       #ifdef WLED_DEBUG
-      DEBUG_PRINT(F("Matrix ledmap:"));
-      for (unsigned i=0; i<customMappingSize; i++) {
+      DEBUG_PRINT(F("Matrix invMap:"));
+      for (unsigned i=0; i<_invMappingSize; i++) {
         if (!(i%Segment::maxWidth)) DEBUG_PRINTLN();
-        DEBUG_PRINTF_P(PSTR("%4d,"), customMappingTable[i]);
+        DEBUG_PRINTF_P(PSTR("%4d,"), _invMappingTable[i] < 0xFFFFU ? _invMappingTable[i] : -1);
         #if defined(CONFIG_IDF_TARGET_ESP32S2)
         delay(1); // on S2 the CDC output can crash without a delay
         #endif
@@ -139,6 +154,9 @@ void WS2812FX::setUpMatrix() {
       resetSegments();
     }
   }
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+    _physMapHash = 0; // force rebuild of _physMap
+#endif
 #else
   isMatrix = false; // no matter what config says
 #endif

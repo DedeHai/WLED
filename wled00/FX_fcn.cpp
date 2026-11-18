@@ -1158,11 +1158,25 @@ void Segment::refreshLightCapabilities() const {
     return;
   }
 
-  // we must traverse each pixel in segment to determine its capabilities (as pixel may be mapped)
-  for (unsigned y = startY; y < stopY; y++) for (unsigned x = start; x < stop; x++) {
-    unsigned index = x + Segment::maxWidth * y;
-    index = strip.getMappedPixelIndex(index); // convert logical address to physical
-    if (index == 0xFFFF) continue;  // invalid/missing  pixel
+  // Traverse physical pixels once (avoids needing a permanent forward mapping table)
+  bool loadedTempInv = false;
+  if ((strip._hasCustomFileMap || strip._hasPanelGaps) && !strip._invMappingTable && !strip.customMappingTable) {
+    if (strip._hasCustomFileMap) loadedTempInv = strip.loadInvMapFromFile(currentLedmap);
+    else if (strip.isMatrix) { strip.setUpMatrix(); loadedTempInv = (strip._invMappingTable != nullptr); }
+  }
+  const uint16_t physLen = strip.getLength();
+  const bool is2DSeg = strip.isMatrix && ((size_t)start + (size_t)startY * Segment::maxWidth + length() <= (size_t)Segment::maxWidth * Segment::maxHeight);
+  for (uint16_t phys = 0; phys < physLen; phys++) {
+    uint16_t logIdx = strip.findLogicalPixel(phys);
+    if (logIdx == 0xFFFFU) continue;
+    if (is2DSeg) {
+      const uint16_t x = logIdx % Segment::maxWidth;
+      const uint16_t y = logIdx / Segment::maxWidth;
+      if (x < start || x >= stop || y < startY || y >= stopY) continue;
+    } else {
+      if (logIdx < start || logIdx >= stop) continue;
+    }
+    unsigned index = phys;
     for (unsigned b = 0; b < BusManager::getNumBusses(); b++) {
       const Bus *bus = BusManager::getBus(b);
       if (!bus || !bus->isOk()) break;
@@ -1181,6 +1195,11 @@ void Segment::refreshLightCapabilities() const {
         break;
       }
     }
+  }
+  if (loadedTempInv) {
+    d_free(strip._invMappingTable);
+    strip._invMappingTable = nullptr;
+    strip._invMappingSize = 0;
   }
   _capabilities = capabilities;
 }
@@ -1403,19 +1422,22 @@ void WS2812FX::finalizeInit() {
   DEBUG_PRINTF_P(PSTR("Heap after strip init: %uB\n"), getFreeHeapSize());
 }
 
-// update global _pixels[] buffer to match getLengthTotal() note: if allocation fails, WLED will not render anything
 void WS2812FX::updatePixelBuffer() {
-  p_free(_pixels); // using realloc on large buffers can cause additional fragmentation instead of reducing it
-  _pixels = nullptr;
-  #ifdef WLED_DISABLE_GLOBAL_PIXELBUFFER
-  // Skip the global framebuffer: blendSegment() encodes directly into bus encode buffers.
-  // This saves N*4 bytes of heap (e.g. 1200B for 300 LEDs, 2000B for 500 LEDs).
-  #else
-  uint32_t requiredMem = getLengthTotal() * sizeof(uint32_t);
-  // use PSRAM if available: there is no measurable perfomance impact between PSRAM and DRAM on S2/S3 with QSPI PSRAM for this buffer
-  _pixels = static_cast<uint32_t*>(allocate_buffer(requiredMem, BFRALLOC_ENFORCE_PSRAM | BFRALLOC_NOBYTEACCESS | BFRALLOC_CLEAR));
-  DEBUG_PRINTF_P(PSTR("strip buffer size: %uB\n"), requiredMem);
-  #endif
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+  p_free(_physMap);
+  _physMap = nullptr;
+  _physMapLen = 0;
+  _physMapHash = 0;
+  if (_length > 0) {
+    const uint32_t requiredMem = (uint32_t)_length * sizeof(uint32_t);
+    _physMap = static_cast<uint32_t*>(allocate_buffer(requiredMem, BFRALLOC_ENFORCE_PSRAM | BFRALLOC_NOBYTEACCESS | BFRALLOC_CLEAR));
+    if (_physMap) {
+      _physMapLen = _length;
+      for (uint16_t i = 0; i < _physMapLen; i++) _physMap[i] = (uint32_t)PHYS_SEG_BLACK << 16;
+    }
+    DEBUG_PRINTF_P(PSTR("physMap buffer size: %uB\n"), requiredMem);
+  }
+#endif
 }
 
 void WS2812FX::service() {
@@ -1517,12 +1539,10 @@ static uint8_t _burn      (uint8_t a, uint8_t b) { return ~_divide(a,~b); }
 static uint8_t _stencil   (uint8_t a, uint8_t b) { return a ? a : b; } // function unused
 static uint8_t _dummy     (uint8_t a, uint8_t b) { return a; } // dummy (same as _top) to fill the function list and make it safe from OOB access
 
-#define BLENDMODES  17 // number of blend modes must match "bm" in index.js, all cases must be handled in segblend() @ blendSegment()
+#define BLENDMODES  17 // number of blend modes must match "bm" in index.js, all cases must be handled in segblend()
 
-void WS2812FX::blendSegment(const Segment &topSegment) const {
+static uint32_t segblend(uint8_t blendMode, uint32_t t, uint32_t b) {
   typedef uint8_t(*FuncType)(uint8_t, uint8_t);
-  // function pointer array: fill with _dummy if using special case: avoid OOB access and always provide a valid path
-  // note: making the function array static const uses more ram and comes at no significant speed gain
   FuncType funcs[] = {
     _dummy,      _dummy,     _dummy,    _subtract,
     _difference, _average,   _dummy,    _divide,
@@ -1530,465 +1550,762 @@ void WS2812FX::blendSegment(const Segment &topSegment) const {
     _hardlight,  _softlight, _dodge,    _burn,
     _dummy
   };
+  if (blendMode >= BLENDMODES) blendMode = 0;
+  switch (blendMode) {
+    case 0 : return t;                   // top
+    case 1 : return b;                   // bottom
+    case 2 : return color_add(t,b,true); // add with preserve color ratio
+    case 6 : return RGBW32(_multiply(R(t),R(b)), _multiply(G(t),G(b)), _multiply(B(t),B(b)), _multiply(W(t),W(b)));
+    case 16: return t ? t : b;           // stencil
+  }
+  const FuncType func = funcs[blendMode];
+  return RGBW32(func(R(t),R(b)), func(G(t),G(b)), func(B(t),B(b)), func(W(t),W(b)));
+}
 
-  const size_t blendMode = topSegment.blendMode < BLENDMODES ? topSegment.blendMode : 0; // default to top if unsupported mode
-  const auto segblend = [&](uint32_t t, uint32_t b){
-    // use direct calculations/returns for simple/frequent modes (faster)
-    switch (blendMode) {
-      case 0 : return t;                   // top
-      case 1 : return b;                   // bottom
-      case 2 : return color_add(t,b,true); // add with preserve color ratio to avoid color clipping
-      case 6 : return RGBW32(_multiply(R(t),R(b)), _multiply(G(t),G(b)), _multiply(B(t),B(b)), _multiply(W(t),W(b))); // multiply (7% faster than lambda at 100bytes flash cost)
-      case 16: return t ? t : b;           // stencil (use top layer if not black, else bottom)
+static bool isStatePixelClipped1D(int i, uint16_t clipStart, uint16_t clipStop, uint8_t style, uint16_t spatialProg) {
+  if (style != TRANSITION_FADE && clipStart != clipStop) {
+    const bool invert = clipStart > clipStop;
+    const int start = invert ? clipStop : clipStart;
+    const int stop  = invert ? clipStart : clipStop;
+    if (style == TRANSITION_FAIRY_DUST) {
+      const unsigned len = stop - start;
+      if (len < 2) return false;
+      const unsigned shuffled = hashInt(i) % len;
+      const unsigned pos = (shuffled * 0xFFFFU) / len;
+      return (spatialProg <= pos);
     }
-    // default: use function pointer from array
-    const auto func = funcs[blendMode];
-    return RGBW32(func(R(t),R(b)), func(G(t),G(b)), func(B(t),B(b)), func(W(t),W(b)));
-  };
+    const bool iInside = (i >= start && i < stop);
+    return !iInside ^ invert;
+  }
+  return false;
+}
 
-  const int     length     = topSegment.length();     // physical segment length (counts all pixels in 2D segment)
-  const int     width      = topSegment.width();
-  const int     height     = topSegment.height();
-  //const uint32_t bgColor   = topSegment.colors[1]; // background color (unused, could add it to stencil mode if requested)
-  const auto    XY         = [](int x, int y){ return x + y*Segment::maxWidth; };
-  const size_t  matrixSize = Segment::maxWidth * Segment::maxHeight;
-  const size_t  startIndx  = XY(topSegment.start, topSegment.startY);
-  const size_t  stopIndx   = startIndx + length;
-  uint8_t       opacity    = topSegment.currentBri(); // returns transitioned opacity for style FADE
-  uint8_t       opacityOld = opacity;                 // we set this to opacity of old segment in non-FADE transitions below
-  uint8_t       cct        = topSegment.currentCCT();
-  const Segment *segO      = topSegment.getOldSegment();
-  uint8_t style = blendingStyle; // need a copy as the function may modify it to FADE
-  if (segO && style != TRANSITION_FADE) opacityOld = segO->currentBri();  // get old segment opacity note: can not use segO->opacity as that breaks off->on transition
-  opacity = gamma8inv(opacity); // use inverse gamma on brightness for correct color scaling after gamma correction (see #5343 for details)
-  opacityOld = gamma8inv(opacityOld);
-  const bool hasGrouping = topSegment.groupLength() != 1;
-
-  #ifdef WLED_DISABLE_GLOBAL_PIXELBUFFER
-  // Direct-to-bus mode: read/write pixels through the bus encode buffer instead of _pixels[].
-  // CCT is set per-segment (not per-pixel) — acceptable trade-off for the RAM saved.
-  // Gamma is applied inline when writing; multi-segment blending occurs in gamma-compressed space.
-  if (!cctFromRgb) BusManager::setSegmentCCT(cct, correctWB);
-  const auto blendPixelIntoFrame = [&](size_t idx, uint32_t newC, uint8_t o) {
-    unsigned physIdx = getMappedPixelIndex(idx);
-    uint32_t result;
-    // Fast path: fully-opaque top layer — result is just newC, no readback needed.
-    // This covers the dominant case (single segment, full brightness, default blend mode)
-    // and avoids an expensive bus decode call per pixel for fast effects like Palette.
-    if (o == 255 && blendMode == 0) {
-      result = newC;
-    } else {
-      uint32_t existing = BusManager::getPixelColor(physIdx);
-      result = color_blend(existing, segblend(newC, existing), o);
+static bool isStatePixelClippedXY(int x, int y, uint16_t clipStart, uint16_t clipStop, uint16_t clipStartY, uint16_t clipStopY, uint8_t style, uint16_t spatialProg) {
+  if (style != TRANSITION_FADE && (clipStart != clipStop || clipStartY != clipStopY)) {
+    const bool invertX = clipStart > clipStop;
+    const bool invertY = clipStartY > clipStopY;
+    const int cStartX = invertX ? clipStop   : clipStart;
+    const int cStopX  = invertX ? clipStart  : clipStop;
+    const int cStartY = invertY ? clipStopY  : clipStartY;
+    const int cStopY  = invertY ? clipStartY : clipStopY;
+    if (style == TRANSITION_FAIRY_DUST) {
+      const unsigned width = cStopX - cStartX;
+      const unsigned len = width * (cStopY - cStartY);
+      if (len < 2) return false;
+      const unsigned shuffled = hashInt(x + y * width) % len;
+      const unsigned pos = (shuffled * 0xFFFFU) / len;
+      return spatialProg <= pos;
     }
-    BusManager::setPixelColor(physIdx, result);
-  };
-  #endif
+    if (style == TRANSITION_CIRCULAR_IN || style == TRANSITION_CIRCULAR_OUT) {
+      const int cx = (cStopX - cStartX + 1) / 2;
+      const int cy = (cStopY - cStartY + 1) / 2;
+      const bool out = (style == TRANSITION_CIRCULAR_OUT);
+      const unsigned prog = out ? spatialProg : 0xFFFFU - spatialProg;
+      int radius2 = max(cx, cy) * prog / 0xFFFF;
+      radius2 = 2 * radius2 * radius2;
+      if (radius2 == 0) return out;
+      const int dx = x - cx;
+      const int dy = y - cy;
+      const bool outside = dx * dx + dy * dy > radius2;
+      return out ? outside : !outside;
+    }
+    bool xInside = (x >= cStartX && x < cStopX); if (invertX) xInside = !xInside;
+    bool yInside = (y >= cStartY && y < cStopY); if (invertY) yInside = !yInside;
+    const bool notclipped = (style == TRANSITION_OUTSIDE_IN) ? (xInside || yInside) : (xInside && yInside);
+    return !notclipped;
+  }
+  return false;
+}
 
-  // fast path: handle the default case - no transitions, no grouping/spacing, no mirroring, no CCT
-  if (!segO && style == TRANSITION_FADE && !hasGrouping && !topSegment.mirror && !topSegment.mirror_y) {
-    if (isMatrix && stopIndx <= matrixSize && !_pixelCCT) {
+uint16_t WS2812FX::panelPhysToLogical(uint16_t phys) const {
 #ifndef WLED_DISABLE_2D
-      // Calculate pointer steps to avoid 'if' and 'XY()' inside loops
-      int x_inc = 1;
-      int y_inc = Segment::maxWidth;
-      int start_offset = XY(topSegment.start, topSegment.startY);
-
-      // adjust starting position and steps based on Reverse/Transpose
-      // note: transpose is handled in separate loop so it is still fast and no branching is needed in default path
-      if (!topSegment.transpose) {
-        if (topSegment.reverse)   { start_offset += (width - 1); x_inc = -1; }
-        if (topSegment.reverse_y) { start_offset += (height - 1) * Segment::maxWidth; y_inc = -Segment::maxWidth; }
-
-        for (int y = 0; y < height; y++) {
-          #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
-          uint32_t* pRow = &_pixels[start_offset + y * y_inc];
-          #endif
-          const int y_width = y * width;
-          for (int x = 0; x < width; x++) {
-            uint32_t c_a = topSegment.getPixelColorRaw(x + y_width);
-            #ifdef WLED_DISABLE_GLOBAL_PIXELBUFFER
-            blendPixelIntoFrame((size_t)(start_offset + y * y_inc + x * x_inc), c_a, opacity);
-            #else
-            uint32_t* p = pRow + x * x_inc;
-            *p = color_blend(*p, segblend(c_a, *p), opacity);
-            #endif
-          }
-        }
-      } else { // transposed
-        for (int y = 0; y < height; y++) {
-          const int px = topSegment.reverse ? (height - y - 1) : y;  // source pixel: swap y into x, reverse if needed
-          for (int x = 0; x < width; x++) {
-            const int py = topSegment.reverse_y ? (width  - x - 1) : x;  // source pixel: swap x into y, reverse if needed
-            const uint32_t c_a = topSegment.getPixelColorRaw(px + py * height); // height = virtual width
-            const size_t idx = XY(topSegment.start + x, topSegment.startY + y); // write logical (non swapped) pixel coordinate
-            #ifdef WLED_DISABLE_GLOBAL_PIXELBUFFER
-            blendPixelIntoFrame(idx, c_a, opacity);
-            #else
-            _pixels[idx] = color_blend(_pixels[idx], segblend(c_a, _pixels[idx]), opacity);
-            #endif
-          }
-        }
-      }
-      return;
+  if (!isMatrix) return phys;
+  uint16_t pixStart = 0;
+  for (const Panel &p : panel) {
+    const uint16_t cnt = (uint16_t)p.width * p.height;
+    if (phys < pixStart + cnt) {
+      const uint16_t local = phys - pixStart;
+      const uint16_t h = p.vertical ? p.height : p.width;
+      const uint16_t v = p.vertical ? p.width  : p.height;
+      const uint16_t j = local / h;
+      const uint16_t i = local % h;
+      uint16_t y = (p.vertical ? p.rightStart  : p.bottomStart) ? (v - j - 1) : j;
+      uint16_t x = (p.vertical ? p.bottomStart : p.rightStart)  ? (h - i - 1) : i;
+      if (p.serpentine && (j & 1)) x = h - x - 1;
+      const uint16_t lx = p.xOffset + (p.vertical ? y : x);
+      const uint16_t ly = p.yOffset + (p.vertical ? x : y);
+      return ly * Segment::maxWidth + lx;
+    }
+    pixStart += cnt;
+  }
+  const unsigned matrixSize = (unsigned)Segment::maxWidth * Segment::maxHeight;
+  if (phys >= matrixSize && phys < _length) return phys;
+  return 0xFFFFU;
+#else
+  return phys;
 #endif
-    } else if (!isMatrix) {
-      // 1D fast path, include CCT as it is more common on 1D setups
-      #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
-      uint32_t* strip = _pixels;
-      #endif
-      int start = topSegment.start;
-      int off   = topSegment.offset;
-      for (int i = 0; i < length; i++) {
-        uint32_t c_a = topSegment.getPixelColorRaw(i);
-        int p = topSegment.reverse ? (length - i - 1) : i;
-        int idx = start + p + off;
-        if (idx >= topSegment.stop) idx -= length;
-        #ifdef WLED_DISABLE_GLOBAL_PIXELBUFFER
-        blendPixelIntoFrame((size_t)idx, c_a, opacity);
-        #else
-        strip[idx] = color_blend(strip[idx], segblend(c_a, strip[idx]), opacity);
-        if (_pixelCCT) _pixelCCT[idx] = cct;
-        #endif
-      }
-      return;
-    }
-  }
+}
 
-  // slow path: handle transitions, grouping/spacing, segments with clipping and CCT pixels
-  Segment::setClippingRect(0, 0);  // disable clipping by default
-  unsigned progress =  (style==TRANSITION_OUTSIDE_IN) ? Segment::invertProgress(topSegment.spatialProgress()) : topSegment.spatialProgress();
-  unsigned progInv  = Segment::invertProgress(progress);
-  const unsigned dw = (progress * width) / 0xFFFFU + 1;
-  const unsigned dh = (progress * height) / 0xFFFFU + 1;
-  const bool invertClipping = (style != TRANSITION_FADE) && topSegment.isTransitionReversed();
-
-  // single pixel segments or transitions without a rendered old segment: use fade
-  if (width*height == 1 || !segO) style = TRANSITION_FADE;
-  switch (style) {
-    case TRANSITION_CIRCULAR_IN: // (must set entire segment, see isPixelXYClipped())
-    case TRANSITION_CIRCULAR_OUT:// (must set entire segment, see isPixelXYClipped())
-    case TRANSITION_FAIRY_DUST:  // fairy dust (must set entire segment, see isPixelXYClipped())
-      Segment::setClippingRect(0, width, 0, height);
-      break;
-    case TRANSITION_SWIPE_RIGHT: // left-to-right
-    case TRANSITION_PUSH_RIGHT:  // left-to-right
-      Segment::setClippingRect(0, dw, 0, height);
-      break;
-    case TRANSITION_SWIPE_LEFT:  // right-to-left
-    case TRANSITION_PUSH_LEFT:   // right-to-left
-      Segment::setClippingRect(width - dw, width, 0, height);
-      break;
-    case TRANSITION_OUTSIDE_IN:   // corners
-      Segment::setClippingRect((width + dw)/2, (width - dw)/2, (height + dh)/2, (height - dh)/2); // inverted!
-      break;
-    case TRANSITION_INSIDE_OUT:  // outward
-      Segment::setClippingRect((width - dw)/2, (width + dw)/2, (height - dh)/2, (height + dh)/2);
-      break;
-    case TRANSITION_SWIPE_DOWN:  // top-to-bottom (2D)
-    case TRANSITION_PUSH_DOWN:   // top-to-bottom (2D)
-      Segment::setClippingRect(0, width, 0, dh);
-      break;
-    case TRANSITION_SWIPE_UP:    // bottom-to-top (2D)
-    case TRANSITION_PUSH_UP:     // bottom-to-top (2D)
-      Segment::setClippingRect(0, width, height - dh, height);
-      break;
-    case TRANSITION_OPEN_H:      // horizontal-outward (2D) same look as INSIDE_OUT on 1D
-      Segment::setClippingRect((width - dw)/2, (width + dw)/2, 0, height);
-      break;
-    case TRANSITION_OPEN_V:      // vertical-outward (2D)
-      Segment::setClippingRect(0, width, (height - dh)/2, (height + dh)/2);
-      break;
-    case TRANSITION_SWIPE_TL:    // TL-to-BR (2D)
-    case TRANSITION_PUSH_TL:     // TL-to-BR (2D)
-      Segment::setClippingRect(0, dw, 0, dh);
-      break;
-    case TRANSITION_SWIPE_TR:    // TR-to-BL (2D)
-    case TRANSITION_PUSH_TR:     // TR-to-BL (2D)
-      Segment::setClippingRect(width - dw, width, 0, dh);
-      break;
-    case TRANSITION_SWIPE_BR:    // BR-to-TL (2D)
-    case TRANSITION_PUSH_BR:     // BR-to-TL (2D)
-      Segment::setClippingRect(width - dw, width, height - dh, height);
-      break;
-    case TRANSITION_SWIPE_BL:    // BL-to-TR (2D)
-    case TRANSITION_PUSH_BL:     // BL-to-TR (2D)
-      Segment::setClippingRect(0, dw, height - dh, height);
-      break;
-  }
-
-  if (isMatrix && stopIndx <= matrixSize) {
+uint16_t WS2812FX::panelLogicalToPhys(uint16_t logIdx) const {
 #ifndef WLED_DISABLE_2D
-    const int nCols = topSegment.virtualWidth();
-    const int nRows = topSegment.virtualHeight();
-    const int oCols = segO ? segO->virtualWidth() : nCols;
-    const int oRows = segO ? segO->virtualHeight() : nRows;
-
-    const auto setMirroredPixel = [&](int x, int y, uint32_t c, uint8_t o) {
-      const int baseX = topSegment.start  + x;
-      const int baseY = topSegment.startY + y;
-      size_t indx = XY(baseX, baseY); // absolute address on strip
-      #ifdef WLED_DISABLE_GLOBAL_PIXELBUFFER
-      blendPixelIntoFrame(indx, c, o);
-      #else
-      _pixels[indx] = color_blend(_pixels[indx], segblend(c, _pixels[indx]), o);
-      if (_pixelCCT) _pixelCCT[indx] = cct;
-      #endif
-      // Apply mirroring if enabled
-      if (topSegment.mirror || topSegment.mirror_y) {
-        const int mirrorX = topSegment.start  + width  - x - 1;
-        const int mirrorY = topSegment.startY + height - y - 1;
-        const size_t idxMX = XY(topSegment.transpose ? baseX : mirrorX, topSegment.transpose ? mirrorY : baseY);
-        const size_t idxMY = XY(topSegment.transpose ? mirrorX : baseX, topSegment.transpose ? baseY : mirrorY);
-        const size_t idxMM = XY(mirrorX, mirrorY);
-        #ifdef WLED_DISABLE_GLOBAL_PIXELBUFFER
-        if (topSegment.mirror)                        blendPixelIntoFrame(idxMX, c, o);
-        if (topSegment.mirror_y)                      blendPixelIntoFrame(idxMY, c, o);
-        if (topSegment.mirror && topSegment.mirror_y) blendPixelIntoFrame(idxMM, c, o);
-        #else
-        if (topSegment.mirror)                        _pixels[idxMX] = color_blend(_pixels[idxMX], segblend(c, _pixels[idxMX]), o);
-        if (topSegment.mirror_y)                      _pixels[idxMY] = color_blend(_pixels[idxMY], segblend(c, _pixels[idxMY]), o);
-        if (topSegment.mirror && topSegment.mirror_y) _pixels[idxMM] = color_blend(_pixels[idxMM], segblend(c, _pixels[idxMM]), o);
-        if (_pixelCCT) {
-          if (topSegment.mirror)                        _pixelCCT[idxMX] = cct;
-          if (topSegment.mirror_y)                      _pixelCCT[idxMY] = cct;
-          if (topSegment.mirror && topSegment.mirror_y) _pixelCCT[idxMM] = cct;
-        }
-        #endif
-      }
-    };
-
-    // if we blend using "push" style we need to "shift" canvas to left/right/up/down
-    unsigned offsetX = (style == TRANSITION_PUSH_UP   || style == TRANSITION_PUSH_DOWN)  ? 0 : progInv * nCols / 0xFFFFU;
-    unsigned offsetY = (style == TRANSITION_PUSH_LEFT || style == TRANSITION_PUSH_RIGHT) ? 0 : progInv * nRows / 0xFFFFU;
-    const unsigned groupLen = topSegment.groupLength();
-    bool applyReverse = topSegment.reverse || topSegment.reverse_y || topSegment.transpose;
-    int pushOffsetX = 0, pushOffsetY = 0;
-    // if we blend using "push" style we need to "shift" canvas to left/right/up/down
-    switch (style) {
-      case TRANSITION_PUSH_RIGHT: pushOffsetX = offsetX; break;
-      case TRANSITION_PUSH_LEFT:  pushOffsetX = -offsetX + nCols; break;
-      case TRANSITION_PUSH_DOWN:  pushOffsetY = offsetY; break;
-      case TRANSITION_PUSH_UP:    pushOffsetY = -offsetY + nRows; break;
-      case TRANSITION_PUSH_TL:    pushOffsetX = offsetX;            pushOffsetY = offsetY; break;           // unused
-      case TRANSITION_PUSH_TR:    pushOffsetX = -offsetX + nCols;   pushOffsetY = offsetY; break;           // unused
-      case TRANSITION_PUSH_BR:    pushOffsetX = -offsetX + nCols;   pushOffsetY = -offsetY + nRows; break;  // unused
-      case TRANSITION_PUSH_BL:    pushOffsetX = offsetX;            pushOffsetY = -offsetY + nRows; break;  // unused
+  if (!isMatrix) return logIdx;
+  const unsigned matrixSize = (unsigned)Segment::maxWidth * Segment::maxHeight;
+  if (logIdx >= matrixSize) return (logIdx < _length) ? logIdx : 0xFFFFU;
+  const uint16_t lx = logIdx % Segment::maxWidth;
+  const uint16_t ly = logIdx / Segment::maxWidth;
+  uint16_t pixStart = 0;
+  for (const Panel &p : panel) {
+    if (lx >= p.xOffset && lx < p.xOffset + p.width && ly >= p.yOffset && ly < p.yOffset + p.height) {
+      const uint16_t px = lx - p.xOffset;
+      const uint16_t py = ly - p.yOffset;
+      const uint16_t h = p.vertical ? p.height : p.width;
+      const uint16_t v = p.vertical ? p.width  : p.height;
+      uint16_t x = p.vertical ? py : px;
+      const uint16_t y = p.vertical ? px : py;
+      const uint16_t j = (p.vertical ? p.rightStart : p.bottomStart) ? (v - y - 1) : y;
+      if (p.serpentine && (j & 1)) x = h - x - 1;
+      const uint16_t i = (p.vertical ? p.bottomStart : p.rightStart) ? (h - x - 1) : x;
+      return pixStart + j * h + i;
     }
-    // we only traverse new segment, not old one
-    for (int r = 0; r < nRows; r++) for (int c = 0; c < nCols; c++) {
-      bool clipped = topSegment.isPixelXYClipped(c, r, style) ^ invertClipping;
-      uint8_t pixelOpacity = clipped ? opacityOld : opacity;
-      // if segment is in transition and pixel is clipped take old segment's pixel and opacity
-      const Segment *seg = clipped && segO ? segO : &topSegment;  // pixel is never clipped for FADE
-      int vCols = seg == segO ? oCols : nCols;         // old segment may have different dimensions
-      int vRows = seg == segO ? oRows : nRows;         // old segment may have different dimensions
-      int x = c;
-      int y = r;
-      if (pushOffsetX != 0) x = (x + pushOffsetX) % nCols;
-      if (pushOffsetY != 0) y = (y + pushOffsetY) % nRows;
-      uint32_t c_a = BLACK;
-      if (x < vCols && y < vRows) c_a = seg->getPixelColorRaw(x + y*vCols); // will get clipped pixel from old segment or unclipped pixel from new segment
-      if (segO && style == TRANSITION_FADE
-        && (topSegment.mode != segO->mode || (segO->name != topSegment.name && segO->name && topSegment.name && strncmp(segO->name, topSegment.name, WLED_MAX_SEGNAME_LEN) != 0))
-        && x < oCols && y < oRows) {
-        // we need to blend old segment using fade as pixels are not clipped
-        c_a = color_blend16(c_a, segO->getPixelColorRaw(x + y*oCols), progInv);
-      } else if (style != TRANSITION_FADE) {
-        // on/off transition workaround: pixels not yet revealed by a wipe-to-off are black, pixels still covered by a wipe-to-on are black
-        if ((topSegment.isPowerOffTransition() && !clipped) || (topSegment.isPowerOnTransition() && clipped)) c_a = BLACK;
+    pixStart += (uint16_t)p.width * p.height;
+  }
+  return 0xFFFFU;
+#else
+  return logIdx;
+#endif
+}
+
+uint16_t WS2812FX::findLogicalPixel(uint16_t physIdx) const {
+  if (physIdx >= _length) return 0xFFFFU;
+  if (_invMappingTable && physIdx < _invMappingSize) return _invMappingTable[physIdx];
+  if (isMatrix && !_hasCustomFileMap && !_hasPanelGaps) return panelPhysToLogical(physIdx);
+  if (!_hasCustomFileMap && !isMatrix) return physIdx;
+  if (customMappingTable) {
+    for (uint16_t l = 0; l < customMappingSize; l++) {
+      if (customMappingTable[l] == physIdx) return l;
+    }
+    return 0xFFFFU;
+  }
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+  // Fallback when _invMappingTable was released after _physMap build: try reloading transient map or matching segment
+  if (_physMap && physIdx < _physMapLen) {
+    const uint32_t entry = _physMap[physIdx];
+    const uint8_t segIdx = (uint8_t)(entry >> 16);
+    if (segIdx == PHYS_SEG_BLACK) return 0xFFFFU;
+    if (segIdx == PHYS_SEG_COMPOSE) {
+      return (entry & PHYS_FLAG_2D) ? ((uint16_t)((entry >> 8) & 0xFFu) * Segment::maxWidth + (uint16_t)(entry & 0xFFu)) : (uint16_t)(entry & 0xFFFFu);
+    }
+  }
+#endif
+  return physIdx;
+}
+
+uint16_t WS2812FX::findPhysicalPixel(uint16_t logIdx) const {
+  if (customMappingTable) {
+    return (logIdx < customMappingSize) ? customMappingTable[logIdx] : 0xFFFFU;
+  }
+  if (!isMatrix && !_hasCustomFileMap) return (logIdx < _length) ? logIdx : 0xFFFFU;
+  if (isMatrix && !_hasCustomFileMap && !_hasPanelGaps) return panelLogicalToPhys(logIdx);
+  if (_invMappingTable) {
+    for (uint16_t p = 0; p < _invMappingSize; p++) {
+      if (_invMappingTable[p] == logIdx) return p;
+    }
+    return 0xFFFFU;
+  }
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+  if (_physMap) {
+    // Check if logIdx matches a PHYS_SEG_COMPOSE entry directly
+    for (uint16_t p = 0; p < _physMapLen; p++) {
+      const uint32_t entry = _physMap[p];
+      const uint8_t segIdx = (uint8_t)(entry >> 16);
+      if (segIdx == PHYS_SEG_COMPOSE) {
+        const uint16_t l = (entry & PHYS_FLAG_2D) ? ((uint16_t)((entry >> 8) & 0xFFu) * Segment::maxWidth + (uint16_t)(entry & 0xFFu)) : (uint16_t)(entry & 0xFFFFu);
+        if (l == logIdx) return p;
       }
-      // map it into frame buffer
-      x = c;  // restore coordiates if we were PUSHing
-      y = r;
-      if (applyReverse) {
-        if (topSegment.reverse  ) x = nCols - x - 1;
-        if (topSegment.reverse_y) y = nRows - y - 1;
-        if (topSegment.transpose) std::swap(x,y); // swap X & Y if segment transposed
-      }
-      // expand pixel
-      if (groupLen == 1) {
-        setMirroredPixel(x, y, c_a, pixelOpacity);
+    }
+    // Otherwise match against covering top segment's virtual index
+    const uint32_t matrixSize = (uint32_t)Segment::maxWidth * Segment::maxHeight;
+    const bool is2DCoord = isMatrix && (logIdx < matrixSize);
+    const uint16_t x = is2DCoord ? (logIdx % Segment::maxWidth) : 0;
+    const uint16_t y = is2DCoord ? (logIdx / Segment::maxWidth) : 0;
+    uint8_t activeIdx = 0;
+    int matchSeg = -1;
+    uint16_t matchPix = 0;
+    for (const Segment &seg : _segments) {
+      if (!seg.isActive() || (!seg.on && !seg.isInTransition())) continue;
+      const uint16_t w = seg.width(), h = seg.height(), len = seg.length();
+      const bool seg2D = isMatrix && ((size_t)seg.start + (size_t)seg.startY * Segment::maxWidth + len <= matrixSize);
+      if (seg2D) {
+        if (is2DCoord && x >= seg.start && x < seg.stop && y >= seg.startY && y < seg.stopY) {
+          uint16_t mx = x - seg.start, my = y - seg.startY;
+          const uint16_t nCols = seg.virtualWidth(), nRows = seg.virtualHeight();
+          const uint8_t gl = seg.groupLength();
+          const bool fx = seg.transpose ? seg.mirror_y : seg.mirror;
+          const bool fy = seg.transpose ? seg.mirror : seg.mirror_y;
+          if (fx && mx >= ((w + 1) >> 1)) mx = w - mx - 1;
+          if (fy && my >= ((h + 1) >> 1)) my = h - my - 1;
+          if (gl == 1 || ((mx % gl) < seg.grouping && (my % gl) < seg.grouping)) {
+            if (gl > 1) { mx /= gl; my /= gl; }
+            if (seg.transpose) std::swap(mx, my);
+            if (mx < nCols && my < nRows) {
+              if (seg.reverse) mx = nCols - mx - 1;
+              if (seg.reverse_y) my = nRows - my - 1;
+              matchSeg = activeIdx;
+              matchPix = mx + my * nCols;
+            }
+          }
+        }
       } else {
-        // handle grouping and spacing
-        x *= groupLen; // expand to physical pixels
-        y *= groupLen; // expand to physical pixels
-        const int maxX = std::min(x + topSegment.grouping, width);
-        const int maxY = std::min(y + topSegment.grouping, height);
-        while (y < maxY) {
-          int _x = x;
-          while (_x < maxX) setMirroredPixel(_x++, y, c_a, pixelOpacity);
-          y++;
+        if (logIdx >= seg.start && logIdx < seg.stop) {
+          uint16_t rel = logIdx - seg.start;
+          const uint16_t off = len ? (seg.offset % len) : 0;
+          if (off) rel = (rel >= off) ? (rel - off) : (rel + len - off);
+          const uint16_t nLen = seg.virtualLength();
+          const uint8_t gl = seg.groupLength();
+          if (seg.mirror && rel >= ((len + 1) >> 1)) rel = len - rel - 1;
+          if (gl == 1 || (rel % gl) < seg.grouping) {
+            if (gl > 1) rel /= gl;
+            if (rel < nLen) {
+              if (seg.reverse) rel = nLen - rel - 1;
+              matchSeg = activeIdx;
+              matchPix = rel;
+            }
+          }
         }
       }
+      activeIdx++;
     }
+    if (matchSeg >= 0) {
+      const uint32_t target = (uint32_t)matchPix | ((uint32_t)matchSeg << 16);
+      for (uint16_t p = 0; p < _physMapLen; p++) {
+        if (_physMap[p] == target) return p;
+      }
+    }
+  }
 #endif
+  return 0xFFFFU;
+}
+
+inline bool WS2812FX::resolveSegmentVirtualCoord(const SegRenderState &s, uint16_t logIdx, uint16_t x, uint16_t y, bool is2DCoord, uint16_t &outC, uint16_t &outR) {
+  if (s.is2DSeg) {
+    if (!is2DCoord || x < s.start || x >= s.stop || y < s.startY || y >= s.stopY) return false;
+    uint16_t mx = x - s.start;
+    uint16_t my = y - s.startY;
+    if (!s.isSimple) {
+      const bool flipX = s.transpose ? s.mirror_y : s.mirror;
+      const bool flipY = s.transpose ? s.mirror   : s.mirror_y;
+      if (flipX && mx >= ((s.width  + 1) >> 1)) mx = s.width  - mx - 1;
+      if (flipY && my >= ((s.height + 1) >> 1)) my = s.height - my - 1;
+      if (s.groupLen > 1) {
+        if ((mx % s.groupLen) >= s.grouping || (my % s.groupLen) >= s.grouping) return false;
+        mx /= s.groupLen;
+        my /= s.groupLen;
+      }
+    }
+    if (s.transpose) std::swap(mx, my);
+    if (mx >= s.nCols || my >= s.nRows) return false;
+    if (s.reverse)   mx = s.nCols - mx - 1;
+    if (s.reverse_y) my = s.nRows - my - 1;
+    outC = mx;
+    outR = my;
+    return true;
   } else {
-    // 1D Slow Path
-    const int nLen = topSegment.virtualLength();
-    const int oLen = segO ? segO->virtualLength() : nLen;
-
-    const auto setMirroredPixel = [&](int i, uint32_t c, uint8_t o) {
-      int indx = topSegment.start + i;
-      #ifdef WLED_DISABLE_GLOBAL_PIXELBUFFER
-      // direct-to-bus: apply mirroring then encode
-      if (topSegment.mirror) {
-        unsigned indxM = topSegment.stop - i - 1;
-        indxM += topSegment.offset; // offset/phase
-        if (indxM >= topSegment.stop) indxM -= length; // wrap
-        blendPixelIntoFrame(indxM, c, o);
+    if (logIdx < s.start || logIdx >= s.stop) return false;
+    uint16_t rel = logIdx - s.start;
+    if (s.offset) rel = (rel >= s.offset) ? (rel - s.offset) : (rel + s.length - s.offset);
+    if (!s.isSimple) {
+      if (s.mirror && rel >= ((s.length + 1) >> 1)) rel = s.length - rel - 1;
+      if (s.groupLen > 1) {
+        if ((rel % s.groupLen) >= s.grouping) return false;
+        rel /= s.groupLen;
       }
-      indx += topSegment.offset; // offset/phase
-      if (indx >= topSegment.stop) indx -= length; // wrap
-      blendPixelIntoFrame((size_t)indx, c, o);
-      #else
-      // Apply mirroring
-      if (topSegment.mirror) {
-        unsigned indxM = topSegment.stop - i - 1;
-        indxM += topSegment.offset; // offset/phase
-        if (indxM >= topSegment.stop) indxM -= length; // wrap
-        _pixels[indxM] = color_blend(_pixels[indxM], segblend(c, _pixels[indxM]), o);
-        if (_pixelCCT) _pixelCCT[indxM] = cct;
-      }
-      indx += topSegment.offset; // offset/phase
-      if (indx >= topSegment.stop) indx -= length; // wrap
-      _pixels[indx] = color_blend(_pixels[indx], segblend(c, _pixels[indx]), o);
-      if (_pixelCCT) _pixelCCT[indx] = cct;
-      #endif
-    };
+    }
+    if (rel >= s.nCols) return false;
+    if (s.reverse) rel = s.nCols - rel - 1;
+    outC = rel;
+    outR = 0;
+    return true;
+  }
+}
 
-    // if we blend using "push" style we need to "shift" canvas to left/right/
-    unsigned offsetI = progInv * nLen / 0xFFFFU;
+void WS2812FX::buildFrameStates(SegRenderState* states, const uint32_t** segPixels, uint8_t* segOpacity, uint8_t* segCCT, uint8_t &numActive, bool &uniformCCT, uint8_t &uniformCCTVal) const {
+  numActive = 0;
+  uniformCCT = true;
+  uniformCCTVal = 127;
+  int16_t firstCCT = -1;
+  const bool checkCCT = (hasCCTBus() || correctWB) && !cctFromRgb;
+  const size_t matrixSize = (size_t)Segment::maxWidth * Segment::maxHeight;
 
-    for (int k = 0; k < nLen; k++) {
-      bool clipped = topSegment.isPixelClipped(k, style) ^ invertClipping;
-      uint8_t pixelOpacity = clipped ? opacityOld : opacity;
-      // if segment is in transition and pixel is clipped take old segment's pixel and opacity
-      const Segment *seg = clipped && segO ? segO : &topSegment;  // pixel is never clipped for FADE
-      const int vLen = seg == segO ? oLen : nLen;
-      int i = k;
-      // if we blend using "push" style we need to "shift" canvas to left or right
+  for (const Segment &seg : _segments) {
+    if (!seg.isActive() || (!seg.on && !seg.isInTransition())) continue;
+    if (numActive >= MAX_NUM_SEGMENTS) break;
+
+    SegRenderState &s = states[numActive];
+    s.pixels = seg.pixels;
+    s.segO = seg.getOldSegment();
+    s.pixelsO = s.segO ? s.segO->pixels : nullptr;
+    s.start = seg.start;
+    s.stop = seg.stop;
+    s.startY = seg.startY;
+    s.stopY = seg.stopY;
+    s.width = seg.width();
+    s.height = seg.height();
+    s.length = seg.length();
+    s.is2DSeg = isMatrix && ((size_t)s.start + (size_t)s.startY * Segment::maxWidth + s.length <= matrixSize);
+    s.grouping = seg.grouping;
+    s.groupLen = seg.groupLength();
+    s.reverse = seg.reverse;
+    s.reverse_y = seg.reverse_y;
+    s.transpose = seg.transpose;
+    s.mirror = seg.mirror;
+    s.mirror_y = seg.mirror_y;
+    s.offset = s.length ? (seg.offset % s.length) : 0;
+    s.blendMode = seg.blendMode < BLENDMODES ? seg.blendMode : 0;
+    s.cct = seg.currentCCT();
+
+    uint8_t opacity = gamma8inv(seg.currentBri());
+    uint8_t opacityOld = opacity;
+    uint8_t style = blendingStyle;
+    if (s.segO && style != TRANSITION_FADE) opacityOld = gamma8inv(s.segO->currentBri());
+    else opacityOld = opacity;
+    if ((s.width * s.height) == 1 || !s.segO) style = TRANSITION_FADE;
+    s.opacity = opacity;
+    s.opacityOld = opacityOld;
+    s.style = style;
+
+    if (s.is2DSeg) {
+      s.nCols = seg.virtualWidth();
+      s.nRows = seg.virtualHeight();
+      s.oCols = s.segO ? s.segO->virtualWidth() : s.nCols;
+      s.oRows = s.segO ? s.segO->virtualHeight() : s.nRows;
+    } else {
+      s.nCols = seg.virtualLength();
+      s.nRows = 1;
+      s.oCols = s.segO ? s.segO->virtualLength() : s.nCols;
+      s.oRows = 1;
+    }
+
+    s.spatialProg = seg.spatialProgress();
+    const unsigned progress = (style == TRANSITION_OUTSIDE_IN) ? Segment::invertProgress(s.spatialProg) : s.spatialProg;
+    s.progInv = Segment::invertProgress(progress);
+    s.invertClipping = (style != TRANSITION_FADE) && seg.isTransitionReversed();
+    s.powerOffTrans = seg.isPowerOffTransition();
+    s.powerOnTrans = seg.isPowerOnTransition();
+    s.fadeOldDiffMode = (s.segO && style == TRANSITION_FADE &&
+      (seg.mode != s.segO->mode || (s.is2DSeg && s.segO->name != seg.name && s.segO->name && seg.name && strncmp(s.segO->name, seg.name, WLED_MAX_SEGNAME_LEN) != 0)));
+
+    s.clipStart = s.clipStop = s.clipStartY = s.clipStopY = 0;
+    s.pushOffsetX = s.pushOffsetY = 0;
+    if (s.segO && style != TRANSITION_FADE) {
+      const unsigned dw = (progress * s.width) / 0xFFFFU + 1;
+      const unsigned dh = (progress * s.height) / 0xFFFFU + 1;
       switch (style) {
-        case TRANSITION_PUSH_RIGHT: i = (i + offsetI) % nLen;        break;
-        case TRANSITION_PUSH_LEFT:  i = (i - offsetI + nLen) % nLen; break;
+        case TRANSITION_CIRCULAR_IN:
+        case TRANSITION_CIRCULAR_OUT:
+        case TRANSITION_FAIRY_DUST:
+          s.clipStop = s.width; s.clipStopY = s.height; break;
+        case TRANSITION_SWIPE_RIGHT:
+        case TRANSITION_PUSH_RIGHT:
+          s.clipStop = dw; s.clipStopY = s.height; break;
+        case TRANSITION_SWIPE_LEFT:
+        case TRANSITION_PUSH_LEFT:
+          s.clipStart = s.width - dw; s.clipStop = s.width; s.clipStopY = s.height; break;
+        case TRANSITION_OUTSIDE_IN:
+          s.clipStart = (s.width + dw) / 2; s.clipStop = (s.width - dw) / 2;
+          s.clipStartY = (s.height + dh) / 2; s.clipStopY = (s.height - dh) / 2; break;
+        case TRANSITION_INSIDE_OUT:
+          s.clipStart = (s.width - dw) / 2; s.clipStop = (s.width + dw) / 2;
+          s.clipStartY = (s.height - dh) / 2; s.clipStopY = (s.height + dh) / 2; break;
+        case TRANSITION_SWIPE_DOWN:
+        case TRANSITION_PUSH_DOWN:
+          s.clipStop = s.width; s.clipStopY = dh; break;
+        case TRANSITION_SWIPE_UP:
+        case TRANSITION_PUSH_UP:
+          s.clipStop = s.width; s.clipStartY = s.height - dh; s.clipStopY = s.height; break;
+        case TRANSITION_OPEN_H:
+          s.clipStart = (s.width - dw) / 2; s.clipStop = (s.width + dw) / 2; s.clipStopY = s.height; break;
+        case TRANSITION_OPEN_V:
+          s.clipStop = s.width; s.clipStartY = (s.height - dh) / 2; s.clipStopY = (s.height + dh) / 2; break;
+        case TRANSITION_SWIPE_TL:
+        case TRANSITION_PUSH_TL:
+          s.clipStop = dw; s.clipStopY = dh; break;
+        case TRANSITION_SWIPE_TR:
+        case TRANSITION_PUSH_TR:
+          s.clipStart = s.width - dw; s.clipStop = s.width; s.clipStopY = dh; break;
+        case TRANSITION_SWIPE_BR:
+        case TRANSITION_PUSH_BR:
+          s.clipStart = s.width - dw; s.clipStop = s.width; s.clipStartY = s.height - dh; s.clipStopY = s.height; break;
+        case TRANSITION_SWIPE_BL:
+        case TRANSITION_PUSH_BL:
+          s.clipStop = dw; s.clipStartY = s.height - dh; s.clipStopY = s.height; break;
       }
-      uint32_t c_a = BLACK;
-      if (i < vLen) c_a = seg->getPixelColorRaw(i); // will get clipped pixel from old segment or unclipped pixel from new segment
-      if (segO && style == TRANSITION_FADE && topSegment.mode != segO->mode && i < oLen) {
-        // we need to blend old segment using fade as pixels are not clipped
-        c_a = color_blend16(c_a, segO->getPixelColorRaw(i), progInv);
-      } else if (style != TRANSITION_FADE) {
-        // on/off transition workaround: pixels not yet revealed by a wipe-to-off are black, pixels still covered by a wipe-to-on are black
-        if ((topSegment.isPowerOffTransition() && !clipped) || (topSegment.isPowerOnTransition() && clipped)) c_a = BLACK;
+      if (s.is2DSeg) {
+        const unsigned offX = (style == TRANSITION_PUSH_UP || style == TRANSITION_PUSH_DOWN) ? 0 : (unsigned)s.progInv * s.nCols / 0xFFFFU;
+        const unsigned offY = (style == TRANSITION_PUSH_LEFT || style == TRANSITION_PUSH_RIGHT) ? 0 : (unsigned)s.progInv * s.nRows / 0xFFFFU;
+        switch (style) {
+          case TRANSITION_PUSH_RIGHT: s.pushOffsetX = offX; break;
+          case TRANSITION_PUSH_LEFT:  s.pushOffsetX = (s.nCols - offX) % s.nCols; break;
+          case TRANSITION_PUSH_DOWN:  s.pushOffsetY = offY; break;
+          case TRANSITION_PUSH_UP:    s.pushOffsetY = (s.nRows - offY) % s.nRows; break;
+          case TRANSITION_PUSH_TL:    s.pushOffsetX = offX; s.pushOffsetY = offY; break;
+          case TRANSITION_PUSH_TR:    s.pushOffsetX = (s.nCols - offX) % s.nCols; s.pushOffsetY = offY; break;
+          case TRANSITION_PUSH_BR:    s.pushOffsetX = (s.nCols - offX) % s.nCols; s.pushOffsetY = (s.nRows - offY) % s.nRows; break;
+          case TRANSITION_PUSH_BL:    s.pushOffsetX = offX; s.pushOffsetY = (s.nRows - offY) % s.nRows; break;
+        }
+      } else {
+        const unsigned offI = (unsigned)s.progInv * s.nCols / 0xFFFFU;
+        if (style == TRANSITION_PUSH_RIGHT) s.pushOffsetX = offI % s.nCols;
+        else if (style == TRANSITION_PUSH_LEFT) s.pushOffsetX = (s.nCols - (offI % s.nCols)) % s.nCols;
       }
-      // map into frame buffer
-      i = k; // restore index if we were PUSHing
-      if (topSegment.reverse) i = nLen - i - 1; // is segment reversed?
-      // expand pixel
-      i *= topSegment.groupLength();
-      // set all the pixels in the group
-      const int maxI = std::min(i + topSegment.grouping, length); // make sure to not go beyond physical length
-      while (i < maxI) setMirroredPixel(i++, c_a, pixelOpacity);
+    }
+
+    s.isSimple = !s.segO && (s.groupLen == 1) && !s.mirror && !s.mirror_y;
+
+    if (checkCCT) {
+      if (firstCCT < 0) {
+        firstCCT = s.cct;
+        uniformCCTVal = s.cct;
+      } else if ((uint8_t)firstCCT != s.cct) {
+        uniformCCT = false;
+      }
+    }
+
+    if (segPixels)  segPixels[numActive]  = s.pixels;
+    if (segOpacity) segOpacity[numActive] = s.opacity;
+    if (segCCT)     segCCT[numActive]     = s.cct;
+    numActive++;
+  }
+}
+
+uint32_t WS2812FX::composeLogicalPixel(uint32_t logOrXY, bool is2DXY, const SegRenderState* states, uint8_t numActive, uint8_t &outCCT) const {
+  if (numActive == 0) return BLACK;
+
+  const uint16_t matrixW = Segment::maxWidth;
+  const uint32_t matrixSize = (uint32_t)matrixW * Segment::maxHeight;
+  uint16_t x = 0, y = 0, logIdx = 0;
+  bool is2DCoord = false;
+  if (is2DXY) {
+    x = logOrXY & 0xFFu;
+    y = (logOrXY >> 8) & 0xFFu;
+    logIdx = y * matrixW + x;
+    is2DCoord = true;
+  } else {
+    logIdx = (uint16_t)logOrXY;
+    is2DCoord = isMatrix && (logIdx < matrixSize);
+    if (is2DCoord) {
+      x = logIdx % matrixW;
+      y = logIdx / matrixW;
     }
   }
 
-  Segment::setClippingRect(0, 0);             // disable clipping for overlays
+  // Inline fast path for a single simple segment (e.g. ESP8266 1D strip)
+  if (numActive == 1 && states[0].isSimple && states[0].blendMode == 0) {
+    const SegRenderState &s = states[0];
+    uint16_t c = 0, r = 0;
+    if (!resolveSegmentVirtualCoord(s, logIdx, x, y, is2DCoord, c, r)) return BLACK;
+    uint32_t col = s.pixels ? s.pixels[c + r * s.nCols] : BLACK;
+    if (s.opacity == 0) col = BLACK;
+    else if (s.opacity < 255) col = fast_color_scale(col, (uint8_t)(s.opacity + 1));
+    outCCT = s.cct;
+    return col;
+  }
+
+  uint32_t accum = BLACK;
+  for (uint8_t idx = 0; idx < numActive; idx++) {
+    const SegRenderState &s = states[idx];
+    uint16_t c = 0, r = 0;
+    if (!resolveSegmentVirtualCoord(s, logIdx, x, y, is2DCoord, c, r)) continue;
+
+    bool clipped = false;
+    uint8_t pixelOpacity = s.opacity;
+    if (s.segO && s.style != TRANSITION_FADE) {
+      if (s.is2DSeg) {
+        clipped = isStatePixelClippedXY(c, r, s.clipStart, s.clipStop, s.clipStartY, s.clipStopY, s.style, s.spatialProg) ^ s.invertClipping;
+      } else {
+        clipped = isStatePixelClipped1D(c, s.clipStart, s.clipStop, s.style, s.spatialProg) ^ s.invertClipping;
+      }
+      if (clipped) pixelOpacity = s.opacityOld;
+    }
+
+    const bool useOld = clipped && s.segO;
+    uint16_t sx = c, sy = r;
+    if (s.pushOffsetX) sx = (sx + s.pushOffsetX) % s.nCols;
+    if (s.pushOffsetY) sy = (sy + s.pushOffsetY) % s.nRows;
+
+    uint32_t c_a = BLACK;
+    if (!useOld) {
+      if (s.pixels && sx < s.nCols && sy < s.nRows) c_a = s.pixels[sx + sy * s.nCols];
+    } else {
+      if (s.pixelsO && sx < s.oCols && sy < s.oRows) c_a = s.pixelsO[sx + sy * s.oCols];
+    }
+
+    if (s.fadeOldDiffMode) {
+      if (s.pixelsO && sx < s.oCols && sy < s.oRows) {
+        c_a = color_blend16(c_a, s.pixelsO[sx + sy * s.oCols], s.progInv);
+      }
+    } else if (s.style != TRANSITION_FADE) {
+      if ((s.powerOffTrans && !clipped) || (s.powerOnTrans && clipped)) c_a = BLACK;
+    }
+
+    accum = color_blend(accum, segblend(s.blendMode, c_a, accum), pixelOpacity);
+    outCCT = s.cct;
+  }
+  return accum;
+}
+
+uint32_t WS2812FX::composeSlowCallback(const void* fxPtr, uint32_t logOrXY, bool is2DXY, uint8_t &outCCT) {
+  const WS2812FX* fx = static_cast<const WS2812FX*>(fxPtr);
+  return fx->composeLogicalPixel(logOrXY, is2DXY, fx->_frameStates, fx->_frameNumActive, outCCT);
+}
+
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+void WS2812FX::rebuildPhysMap() {
+  if (!_physMap || _physMapLen == 0) return;
+
+  SegRenderState states[MAX_NUM_SEGMENTS];
+  uint8_t numActive = 0;
+  bool dummyUniform = true;
+  uint8_t dummyCCT = 127;
+  buildFrameStates(states, nullptr, nullptr, nullptr, numActive, dummyUniform, dummyCCT);
+
+  bool loadedTransientInv = false;
+  if (!_invMappingTable && (_hasCustomFileMap || _hasPanelGaps)) {
+    if (_hasCustomFileMap) loadedTransientInv = loadInvMapFromFile(currentLedmap);
+    else if (isMatrix) {
+      setUpMatrix(); // populates _invMappingTable for /2d-gaps.json
+      loadedTransientInv = (_invMappingTable != nullptr);
+    }
+  }
+
+  const uint16_t matrixW = Segment::maxWidth;
+  const uint32_t matrixSize = (uint32_t)matrixW * Segment::maxHeight;
+  const bool usePanelMath = isMatrix && !_invMappingTable && !_hasCustomFileMap && !_hasPanelGaps;
+
+  for (uint16_t phys = 0; phys < _physMapLen; phys++) {
+    uint16_t logIdx = phys;
+    if (_invMappingTable) {
+      logIdx = (phys < _invMappingSize) ? _invMappingTable[phys] : 0xFFFFU;
+    } else if (usePanelMath) {
+      logIdx = panelPhysToLogical(phys);
+    }
+    if (logIdx == 0xFFFFU) {
+      _physMap[phys] = (uint32_t)PHYS_SEG_BLACK << 16;
+      continue;
+    }
+
+    const bool is2DCoord = isMatrix && (logIdx < matrixSize);
+    const uint16_t x = is2DCoord ? (logIdx % matrixW) : 0;
+    const uint16_t y = is2DCoord ? (logIdx / matrixW) : 0;
+
+    uint8_t ownerSeg = PHYS_SEG_BLACK;
+    uint16_t ownerPix = 0;
+    bool needsCompose = false;
+
+    for (uint8_t sIdx = 0; sIdx < numActive; sIdx++) {
+      const SegRenderState &s = states[sIdx];
+      uint16_t c = 0, r = 0;
+      if (!resolveSegmentVirtualCoord(s, logIdx, x, y, is2DCoord, c, r)) continue;
+
+      if (s.blendMode == 0 && !s.segO && (s.opacity == 255 || ownerSeg == PHYS_SEG_BLACK)) {
+        needsCompose = false;
+        ownerSeg = sIdx;
+        ownerPix = c + r * s.nCols;
+      } else {
+        needsCompose = true;
+        ownerSeg = PHYS_SEG_COMPOSE;
+      }
+    }
+
+    if (needsCompose) {
+      if (is2DCoord) {
+        _physMap[phys] = (uint32_t)x | ((uint32_t)y << 8) | ((uint32_t)PHYS_SEG_COMPOSE << 16) | PHYS_FLAG_2D;
+      } else {
+        _physMap[phys] = (uint32_t)logIdx | ((uint32_t)PHYS_SEG_COMPOSE << 16);
+      }
+    } else if (ownerSeg == PHYS_SEG_BLACK) {
+      _physMap[phys] = (uint32_t)PHYS_SEG_BLACK << 16;
+    } else {
+      _physMap[phys] = (uint32_t)ownerPix | ((uint32_t)ownerSeg << 16);
+    }
+  }
+
+  // Free transient _invMappingTable in _physMap builds so max RAM stays <= 4B/px
+  if (_invMappingTable) {
+    d_free(_invMappingTable);
+    _invMappingTable = nullptr;
+    _invMappingSize = 0;
+    if (loadedTransientInv) {} // silence unused warning if WLED_DEBUG disabled
+  }
+}
+
+void WS2812FX::ensurePhysMapValid() {
+  if (!_physMap || _physMapLen != _length) updatePixelBuffer();
+  if (!_physMap) return;
+
+  uint32_t h = 2166136261u;
+  auto mix = [&](uint32_t v) { h ^= v; h *= 16777619u; };
+  mix(_length);
+  mix(_logicalLength);
+  mix(Segment::maxWidth);
+  mix(Segment::maxHeight);
+  mix((uint32_t)isMatrix | ((uint32_t)_hasCustomFileMap << 1) | ((uint32_t)_hasPanelGaps << 2) | ((uint32_t)currentLedmap << 8));
+  uint8_t sIdx = 0;
+  for (const Segment &seg : _segments) {
+    if (!seg.isActive() || (!seg.on && !seg.isInTransition())) continue;
+    mix(sIdx++);
+    mix(((uint32_t)seg.start << 16) | seg.stop);
+    mix(((uint32_t)seg.startY << 16) | seg.stopY);
+    mix(((uint32_t)seg.offset << 16) | ((uint32_t)seg.grouping << 8) | seg.spacing);
+    const uint32_t flags = (uint32_t)seg.reverse | ((uint32_t)seg.reverse_y << 1) | ((uint32_t)seg.transpose << 2) |
+                           ((uint32_t)seg.mirror << 3) | ((uint32_t)seg.mirror_y << 4) |
+                           ((uint32_t)(seg.blendMode == 0) << 5) | ((uint32_t)(seg.currentBri() == 255) << 6) |
+                           ((uint32_t)seg.isInTransition() << 7);
+    mix(flags);
+  }
+  if (h == 0) h = 1;
+  if (h != _physMapHash) {
+    _physMapHash = h;
+    rebuildPhysMap();
+  }
+}
+#endif
+
+void WS2812FX::prepareRealtimeMapping(bool enterRealtime) {
+  if (enterRealtime) {
+    if (customMappingTable || (!_hasCustomFileMap && !_hasPanelGaps)) return;
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+    p_free(_physMap);
+    _physMap = nullptr;
+    _physMapLen = 0;
+    _physMapHash = 0;
+#endif
+    d_free(_invMappingTable);
+    _invMappingTable = nullptr;
+    _invMappingSize = 0;
+    loadForwardMapFromFile(currentLedmap);
+  } else {
+    if (!customMappingTable && _invMappingTable) return;
+    if (customMappingTable) {
+      d_free(customMappingTable);
+      customMappingTable = nullptr;
+      customMappingSize = 0;
+    }
+#ifdef WLED_DISABLE_GLOBAL_PIXELBUFFER
+    if (_hasCustomFileMap) loadInvMapFromFile(currentLedmap);
+    else if (isMatrix) setUpMatrix();
+#else
+    updatePixelBuffer();
+    ensurePhysMapValid();
+#endif
+  }
 }
 
 void WS2812FX::show() {
-  #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
-  if (!_pixels) {
-    DEBUGFX_PRINTLN(F("Error: no _pixels!"));
-    errorFlag = ERR_NORAM;
-    return; // no pixels allocated, nothing to show
-  }
-  #endif
   BusManager::updateGammaUse(); // update gamma use in case something changed
   unsigned long showNow = millis();
   size_t diff = showNow - _lastShow;
 
-  size_t totalLen = getLengthTotal();
-  // CCT per-pixel tracking: only needed when multiple active segments have *different* CCT values.
-  // When all segments share the same CCT we skip the allocation entirely and set Bus::_cct once
-  // before the paint loop — identical to the original per-pixel-change path but without the buffer.
-  #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
-  uint8_t uniformCCT = 127; // neutral 50:50 CCT; used when no buffer is allocated
-  if ((hasCCTBus() || correctWB) && !cctFromRgb) {
-    int16_t firstCCT = -1; // -1 = "no active segment seen yet"
-    for (const Segment &seg : _segments) {
-      if (!seg.isActive() || (!seg.on && !seg.isInTransition())) continue;
-      uint8_t segCCT = seg.currentCCT();
-      if (firstCCT < 0) {
-        firstCCT = segCCT;
-        uniformCCT = segCCT;
-      } else if ((uint8_t)firstCCT != segCCT) {
-        // segments have different CCT values — need per-pixel buffer
-        _pixelCCT = static_cast<uint8_t*>(allocate_buffer(totalLen * sizeof(uint8_t), BFRALLOC_PREFER_PSRAM));
-        if (_pixelCCT) memset(_pixelCCT, 127, totalLen); // set neutral (50:50) CCT
-        break;
-      }
-    }
-  }
-  #else
-  while (!BusManager::canAllShow()) yield(); // wait for all buses to finish before clear/blend/overlay/show
-  int oldCCT = Bus::getCCT(); // preserve global CCT across per-segment CCT updates
-  #endif
-
-  if (realtimeMode == REALTIME_MODE_INACTIVE || useMainSegmentOnly || realtimeOverride > REALTIME_OVERRIDE_NONE) {
-    #ifdef WLED_DISABLE_GLOBAL_PIXELBUFFER
-    // Direct-to-bus mode: clear bus encode buffers then blend segments directly into them.
-    // Per-pixel CCT tracking is not supported; CCT is set per-segment in blendSegment().
-    if (cctFromRgb) BusManager::setSegmentCCT(-1); // set once; blendSegment skips CCT if cctFromRgb
-    BusManager::clearPixels(totalLen);
-    for (Segment &seg : _segments) if (seg.isActive() && (seg.on || seg.isInTransition())) {
-      blendSegment(seg);
-    }
-    #else
-    // clear frame buffer
-    memset(_pixels, 0, sizeof(uint32_t) * totalLen);
-    // blend all segments into (cleared) buffer
-    for (Segment &seg : _segments) if (seg.isActive() && (seg.on || seg.isInTransition())) {
-      blendSegment(seg);              // blend segment's buffer into frame buffer
-    }
-    #endif
+  const bool renderSegments = (realtimeMode == REALTIME_MODE_INACTIVE || useMainSegmentOnly || realtimeOverride > REALTIME_OVERRIDE_NONE);
+  if (renderSegments) {
+    if (customMappingTable != nullptr) prepareRealtimeMapping(false);
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+    ensurePhysMapValid();
+#endif
   }
 
-  // Paint overlays in to pixel buffer
+  while (!BusManager::canAllShow()) yield(); // wait for all buses to finish sending the previous frame
+
+  if (renderSegments) {
+    SegRenderState states[MAX_NUM_SEGMENTS];
+    const uint32_t* segPixels[MAX_NUM_SEGMENTS];
+    uint8_t segOpacity[MAX_NUM_SEGMENTS];
+    uint8_t segCCT[MAX_NUM_SEGMENTS];
+    uint8_t numActive = 0;
+    bool uniformCCT = true;
+    uint8_t uniformCCTVal = 127;
+
+    buildFrameStates(states, segPixels, segOpacity, segCCT, numActive, uniformCCT, uniformCCTVal);
+
+    _frameStates    = states;
+    _frameNumActive = numActive;
+
+    PullPixelContext ctx{};
+    ctx.segPixels   = segPixels;
+    ctx.segOpacity  = segOpacity;
+    ctx.segCCT      = segCCT;
+    ctx.numActive   = numActive;
+    ctx.uniformCCT  = uniformCCT || cctFromRgb;
+    ctx.correctWB   = correctWB;
+    ctx.cctFromRgb  = cctFromRgb;
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+    ctx.physMap     = _physMap;
+    ctx.physMapLen  = _physMap ? _physMapLen : 0;
+#else
+    ctx.invMap      = _invMappingTable;
+    ctx.invMapLen   = _invMappingSize;
+#endif
+    ctx.composeSlow = WS2812FX::composeSlowCallback;
+    ctx.fxPtr       = this;
+
+    const int oldCCT = Bus::getCCT();
+    if (cctFromRgb) BusManager::setSegmentCCT(-1);
+    else if (uniformCCT) BusManager::setSegmentCCT(uniformCCTVal, correctWB);
+
+    BusManager::updateFromBuffer(ctx);
+    Bus::setCCT(oldCCT);
+
+    _frameStates    = nullptr;
+    _frameNumActive = 0;
+  }
+
+  // Paint overlays directly into bus encode buffers (after segment pull, before ABL & show)
   handleOverlayDraw();
 
-  #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
-  while (!BusManager::canAllShow()) yield(); // wait for all buses to finish sending the previous frame
-  // paint actual pixels
-  int oldCCT = Bus::getCCT(); // store original CCT value (since it is global)
-  // when cctFromRgb is true we implicitly calculate WW and CW from RGB values (cct==-1)
-  if (cctFromRgb) BusManager::setSegmentCCT(-1);
-  else if (!_pixelCCT) BusManager::setSegmentCCT(uniformCCT, correctWB); // uniform CCT: set once before loop
-
-  for (size_t i = 0; i < totalLen; i++) {
-    // when correctWB is true setSegmentCCT() will convert CCT into K with which we can then
-    // correct/adjust RGB value according to desired CCT value, it will still affect actual WW/CW ratio
-    if (_pixelCCT) { // cctFromRgb already excluded at allocation
-      if (i == 0 || _pixelCCT[i-1] != _pixelCCT[i]) BusManager::setSegmentCCT(_pixelCCT[i], correctWB);
-    }
-    uint32_t c = _pixels[i]; // need a copy, do not modify _pixels directly (no byte access allowed on ESP32)
-    BusManager::setPixelColor(getMappedPixelIndex(i), c);
-  }
-  Bus::setCCT(oldCCT);  // restore old CCT for ABL adjustments
-
-  p_free(_pixelCCT);
-  _pixelCCT = nullptr;
-  #else
-  Bus::setCCT(oldCCT);
-  #endif
-
-  // pass the pixels on to the buses and start sending them out
+  // Pass the pixels on to the buses and start sending them out
   BusManager::show();
 
   if (diff > 0) { // skip calculation if no time has passed
-    size_t fpsCurr = (1000 << FPS_CALC_SHIFT) / diff; // fixed point math
-    _cumulativeFps = (FPS_CALC_AVG * _cumulativeFps + fpsCurr + FPS_CALC_AVG / 2) / (FPS_CALC_AVG + 1);   // "+FPS_CALC_AVG/2" for proper rounding
+    size_t fpsCurr = (1000 << FPS_CALC_SHIFT) / diff;
+    _cumulativeFps = (FPS_CALC_AVG * _cumulativeFps + fpsCurr + FPS_CALC_AVG / 2) / (FPS_CALC_AVG + 1);
     _lastShow = showNow;
   }
+}
+
+void WS2812FX::setPixelColor(unsigned n, uint32_t c) const {
+  const uint16_t phys = (realtimeMode == REALTIME_MODE_INACTIVE || realtimeRespectLedMaps) ? findPhysicalPixel(n) : (uint16_t)n;
+  if (phys < _length) BusManager::setPixelColor(phys, c);
+}
+
+uint32_t WS2812FX::getPixelColor(unsigned n) const {
+  const uint16_t total = getLengthTotal();
+  if (n >= total) return 0;
+  if (realtimeMode == REALTIME_MODE_INACTIVE || useMainSegmentOnly || realtimeOverride > REALTIME_OVERRIDE_NONE) {
+    SegRenderState states[MAX_NUM_SEGMENTS];
+    uint8_t numActive = 0;
+    bool dummyUniform = true;
+    uint8_t dummyCCT = 127;
+    buildFrameStates(states, nullptr, nullptr, nullptr, numActive, dummyUniform, dummyCCT);
+    uint8_t dummyOutCCT = 127;
+    return composeLogicalPixel(n, false, states, numActive, dummyOutCCT);
+  }
+  const uint16_t phys = realtimeRespectLedMaps ? findPhysicalPixel(n) : (uint16_t)n;
+  return (phys < _length) ? BusManager::getPixelColor(phys) : 0;
+}
+
+uint32_t WS2812FX::getPixelColorNoMap(unsigned n) const {
+  if (n >= _length) return 0;
+  if (realtimeMode == REALTIME_MODE_INACTIVE || useMainSegmentOnly || realtimeOverride > REALTIME_OVERRIDE_NONE) {
+    const uint16_t logIdx = findLogicalPixel(n);
+    if (logIdx >= getLengthTotal()) return 0;
+    SegRenderState states[MAX_NUM_SEGMENTS];
+    uint8_t numActive = 0;
+    bool dummyUniform = true;
+    uint8_t dummyCCT = 127;
+    buildFrameStates(states, nullptr, nullptr, nullptr, numActive, dummyUniform, dummyCCT);
+    uint8_t dummyOutCCT = 127;
+    return composeLogicalPixel(logIdx, false, states, numActive, dummyOutCCT);
+  }
+  return BusManager::getPixelColor(n);
 }
 
 void WS2812FX::setRealtimePixelColor(unsigned i, uint32_t c) {
@@ -1996,6 +2313,9 @@ void WS2812FX::setRealtimePixelColor(unsigned i, uint32_t c) {
     const Segment &seg = getMainSegment();
     if (seg.isActive() && i < seg.length()) seg.setPixelColorRaw(i, c);
   } else {
+    if (!realtimeOverride && realtimeRespectLedMaps && !customMappingTable && (_hasCustomFileMap || _hasPanelGaps)) {
+      prepareRealtimeMapping(true);
+    }
     setPixelColor(i, c);
   }
 }
@@ -2117,7 +2437,7 @@ uint8_t WS2812FX::getActiveSegmentsNum() const {
 uint16_t WS2812FX::getLengthTotal() const {
   unsigned len = Segment::maxWidth * Segment::maxHeight; // will be _length for 1D (see finalizeInit()) but should cover whole matrix for 2D
   if (isMatrix && _length > len) len = _length; // for 2D with trailing strip
-  if (isMatrix && customMappingSize > len) len = customMappingSize; // sparse matrix ledmap with gaps and trailing strip (see deserializeMap())
+  if (isMatrix && _logicalLength > len) len = _logicalLength; // sparse matrix ledmap with gaps and trailing strip (see deserializeMap())
   return len;
 }
 
@@ -2316,34 +2636,165 @@ void WS2812FX::printSize() {
   for (const Segment &seg : _segments) DEBUG_PRINTF_P(PSTR("  Seg: %d,%d [A=%d, 2D=%d, RGB=%d, W=%d, CCT=%d]\n"), seg.width(), seg.height(), seg.isActive(), seg.is2D(), seg.hasRGB(), seg.hasWhite(), seg.isCCT());
   DEBUG_PRINTF_P(PSTR("Modes: %d*%d=%uB\n"), sizeof(mode_ptr), _mode.size(), (_mode.capacity()*sizeof(mode_ptr)));
   DEBUG_PRINTF_P(PSTR("Data: %d*%d=%uB\n"), sizeof(const char *), _modeData.size(), (_modeData.capacity()*sizeof(const char *)));
-  DEBUG_PRINTF_P(PSTR("Map: %d*%d=%uB\n"), sizeof(uint16_t), (int)customMappingSize, customMappingSize*sizeof(uint16_t));
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+  DEBUG_PRINTF_P(PSTR("PhysMap: %d*%d=%uB\n"), sizeof(uint32_t), (int)_physMapLen, _physMapLen*sizeof(uint32_t));
+#else
+  DEBUG_PRINTF_P(PSTR("InvMap: %d*%d=%uB\n"), sizeof(uint16_t), (int)_invMappingSize, _invMappingSize*sizeof(uint16_t));
+#endif
 }
 #endif
 
+// Helper to build _invMappingTable[_length] directly from /ledmap[n].json (no forward table needed)
+bool WS2812FX::loadInvMapFromFile(unsigned n) {
+  char fileName[32];
+  strcpy_P(fileName, PSTR("/ledmap"));
+  if (n) sprintf(fileName + 7, "%d", n);
+  strcat_P(fileName, PSTR(".json"));
+  if (!WLED_FS.exists(fileName)) return false;
+
+  d_free(_invMappingTable);
+  _invMappingTable = static_cast<uint16_t*>(d_malloc(sizeof(uint16_t) * _length));
+  if (!_invMappingTable) {
+    _invMappingSize = 0;
+    DEBUG_PRINTLN(F("ERROR LED invMap allocation error."));
+    return false;
+  }
+  _invMappingSize = _length;
+  memset(_invMappingTable, 0xFF, sizeof(uint16_t) * _length);
+
+  File f = WLED_FS.open(fileName, "r");
+  if (f && f.find("\"map\"")) {
+    int value;
+    unsigned logIdx = 0;
+    const unsigned maxEntries = isMatrix ? getLengthTotal() : _length;
+    while (logIdx < maxEntries && readNextIntFromFile(f, value)) {
+      if (value >= 0 && value < (int)_length) {
+        _invMappingTable[value] = (uint16_t)logIdx;
+      }
+      logIdx++;
+    }
+    f.close();
+    return true;
+  }
+  if (f) f.close();
+  return false;
+}
+
+// Helper to load forward customMappingTable transiently during realtimeMode
+bool WS2812FX::loadForwardMapFromFile(unsigned n) {
+  d_free(customMappingTable);
+  customMappingTable = nullptr;
+  customMappingSize = 0;
+
+#ifndef WLED_DISABLE_2D
+  if (!_hasCustomFileMap && _hasPanelGaps && isMatrix) {
+    // Reconstruct forward map from panel[] + /2d-gaps.json
+    const unsigned mapSize = getLengthTotal();
+    customMappingTable = static_cast<uint16_t*>(d_malloc(sizeof(uint16_t) * mapSize));
+    if (!customMappingTable) return false;
+    customMappingSize = mapSize;
+    const unsigned matrixSize = (unsigned)Segment::maxWidth * Segment::maxHeight;
+    for (unsigned i = 0; i < matrixSize; i++) customMappingTable[i] = 0xFFFFU;
+    for (unsigned i = matrixSize; i < mapSize; i++) customMappingTable[i] = i;
+    int8_t *gapTable = nullptr;
+    File gf = WLED_FS.open("/2d-gaps.json", "r");
+    if (gf) {
+      gapTable = static_cast<int8_t*>(p_malloc(matrixSize));
+      if (gapTable) {
+        int val; unsigned cnt = 0;
+        while (cnt < matrixSize && readNextIntFromFile(gf, val)) gapTable[cnt++] = (int8_t)constrain(val, -1, 1);
+        if (cnt < matrixSize) { p_free(gapTable); gapTable = nullptr; }
+      }
+      gf.close();
+    }
+    unsigned pix = 0;
+    for (const Panel &p : panel) {
+      const unsigned h = p.vertical ? p.height : p.width;
+      const unsigned v = p.vertical ? p.width  : p.height;
+      for (size_t j = 0; j < v; j++) {
+        for (size_t i = 0; i < h; i++) {
+          unsigned y = (p.vertical ? p.rightStart  : p.bottomStart) ? v - j - 1 : j;
+          unsigned x = (p.vertical ? p.bottomStart : p.rightStart)  ? h - i - 1 : i;
+          if (p.serpentine && (j & 1)) x = h - x - 1;
+          const size_t index = (p.yOffset + (p.vertical ? x : y)) * Segment::maxWidth + p.xOffset + (p.vertical ? y : x);
+          if (!gapTable || gapTable[index] >  0) customMappingTable[index] = pix;
+          if (!gapTable || gapTable[index] >= 0) pix++;
+        }
+      }
+    }
+    p_free(gapTable);
+    return true;
+  }
+#endif
+
+  char fileName[32];
+  strcpy_P(fileName, PSTR("/ledmap"));
+  if (n) sprintf(fileName + 7, "%d", n);
+  strcat_P(fileName, PSTR(".json"));
+  if (!WLED_FS.exists(fileName)) return false;
+
+  const unsigned mapSize = isMatrix ? getLengthTotal() : _length;
+  customMappingTable = static_cast<uint16_t*>(d_malloc(sizeof(uint16_t) * mapSize));
+  if (!customMappingTable) return false;
+  memset(customMappingTable, 0xFF, sizeof(uint16_t) * mapSize);
+  File f = WLED_FS.open(fileName, "r");
+  if (f && f.find("\"map\"")) {
+    int value;
+    unsigned mapindex = 0;
+    while (mapindex < mapSize && readNextIntFromFile(f, value)) {
+      if (value < 0 || value >= (int)_length) value = 0xFFFF;
+      customMappingTable[mapindex++] = (uint16_t)value;
+    }
+    customMappingSize = mapSize;
+    f.close();
+    return true;
+  }
+  if (f) f.close();
+  d_free(customMappingTable);
+  customMappingTable = nullptr;
+  return false;
+}
+
 // load custom mapping table from JSON file (called from finalizeInit() or deserializeState())
-// if this is a matrix set-up and default ledmap.json file does not exist, create mapping table using setUpMatrix() from panel information
+// if this is a matrix set-up and default ledmap.json file does not exist, create mapping from panel information
 // WARNING: effect drawing has to be suspended (strip.suspend()) or must be called from loop() context
 bool WS2812FX::deserializeMap(unsigned n) {
   char fileName[32];
   strcpy_P(fileName, PSTR("/ledmap"));
-  if (n) sprintf(fileName +7, "%d", n);
+  if (n) sprintf(fileName + 7, "%d", n);
   strcat_P(fileName, PSTR(".json"));
   bool isFile = WLED_FS.exists(fileName);
 
-  customMappingSize = 0; // prevent use of mapping if anything goes wrong
+  d_free(customMappingTable);
+  customMappingTable = nullptr;
+  customMappingSize = 0;
+  d_free(_invMappingTable);
+  _invMappingTable = nullptr;
+  _invMappingSize = 0;
+  _logicalLength = 0;
+  _hasCustomFileMap = false;
+  _hasPanelGaps = false;
   currentLedmap = 0;
   if (n == 0 || isFile) interfaceUpdateCallMode = CALL_MODE_WS_SEND; // schedule WS update (to inform UI)
   uint32_t lengthTotalBefore = strip.getLengthTotal();
 
-  if (!isFile && n==0 && isMatrix) {
-    // 2D panel support creates its own ledmap (on the fly) if a ledmap.json does not exist
+  if (!isFile && n == 0 && isMatrix) {
+    // 2D panel support creates its own mapping if a ledmap.json does not exist
     setUpMatrix();
     if (strip.getLengthTotal() != lengthTotalBefore)
-      strip.updatePixelBuffer(); // allocate _pixels[] to match new length
+      strip.updatePixelBuffer();
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+    _physMapHash = 0;
+#endif
     return false;
   }
 
-  if (!isFile || !requestJSONBufferLock(JSON_LOCK_LEDMAP)) return false;
+  if (!isFile || !requestJSONBufferLock(JSON_LOCK_LEDMAP)) {
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+    _physMapHash = 0;
+#endif
+    return false;
+  }
 
   StaticJsonDocument<64> filter;
   filter[F("width")]  = true;
@@ -2356,7 +2807,6 @@ bool WS2812FX::deserializeMap(unsigned n) {
     DEBUG_PRINTF_P(PSTR("Reading LED map from %s\n"), fileName);
 
   JsonObject root = pDoc->as<JsonObject>();
-  // if we are loading default ledmap (at boot) set matrix width and height from the ledmap (compatible with WLED MM ledmaps)
   if (n == 0 && (!root[F("width")].isNull() || !root[F("height")].isNull())) {
     Segment::maxWidth  = min(max(root[F("width")].as<int>(), 1), 255);
     Segment::maxHeight = min(max(root[F("height")].as<int>(), 1), 255);
@@ -2365,111 +2815,46 @@ bool WS2812FX::deserializeMap(unsigned n) {
   }
   releaseJSONBufferLock();
 
-  d_free(customMappingTable);
-  customMappingTable = nullptr;
-
   if (isMatrix) {
-    // 2D set-up: read the file twice: first pass counts valid pixel entries (numPhy)
-    // then allocate matrixSize + trailingCount and fill it on the second pass including trailing pixels
-    // if entries are missing, they are appended (fallback)
     const unsigned matrixSize = Segment::maxWidth * Segment::maxHeight;
-
-    // count entries and physical pixels used in the matrix, any left-over physical pixels are trailing pixels
     unsigned entries = 0;
     unsigned numPhy = 0;
     File f = WLED_FS.open(fileName, "r");
     if (f && f.find("\"map\"")) {
       int value;
       while (entries++ < matrixSize && readNextIntFromFile(f, value)) {
-        if (value >= 0 && value < (int)_length) numPhy++; // valid physical pixel entry
+        if (value >= 0 && value < (int)_length) numPhy++;
       }
-      f.seek(0); // go back to the start of the file (closing and re-opening is slow)
     }
-    // we now know the max physical pixel used in the map, check if we have unmapped pixels left (_length is total  physical)
+    if (f) f.close();
     if (entries > 0) {
       const unsigned trailingCount = (_length > numPhy) ? _length - numPhy : 0;
-      const unsigned mapSize = matrixSize + trailingCount;
-      customMappingTable = static_cast<uint16_t*>(d_malloc(sizeof(uint16_t) * mapSize)); // prefer DRAM for speed
-
-      if (customMappingTable) {
-        DEBUG_PRINTF_P(PSTR("ledmap allocated: %uB\n"), sizeof(uint16_t) * mapSize);
-        memset(customMappingTable, 0xFF, sizeof(uint16_t) * mapSize); // pre-fill with "-1" i.e. unmapped pixel
-
-        // second pass: fill matrix entries from file
-        numPhy = 0; // reset
-        unsigned mapindex = 0;
-        if (f && f.find("\"map\"")) { // advance to "map", readNextIntFromFile discards any chars up to the first number
-          int value;
-          while (mapindex < mapSize && readNextIntFromFile(f, value)) {
-            if (value < 0 || value >= _length) value = 0xFFFF; // set out of range mappings to unused
-            customMappingTable[mapindex++] = (uint16_t)value;
-            //if (value < 0xFFFF) numPhy++; // count valid physical pixel entries (needed for auto-trailing only, see below)
-          }
-        }
-
-        // TODO: this is a design choice: leave unmapped pixels black or append them as a strip?
-        // append any pixels missing in the LEDmap at the end in ascending order
-        // very simple walk-through search, users should map all pixels, this is a fallback
-        /*
-        if (numPhy < _length) {
-          for (unsigned p = 0; p < _length; p++) {
-            bool used = false;
-            // go through the whole map and check if this pixel index is not yet mapped
-            for (unsigned i = 0; i < mapSize; i++) {
-              if (customMappingTable[i] == p) { used = true; break; }
-            }
-            if (!used) customMappingTable[mapindex++] = (uint16_t)p; // append the unmapped pixel
-            if (mapindex >= mapSize) break; // safety check, should not happen
-          }
-        }
-        */
-        customMappingSize = mapSize;
-        currentLedmap = n;
-      } else {
-        DEBUG_PRINTLN(F("ERROR LED map allocation error."));
-      }
+      _logicalLength = matrixSize + trailingCount;
     }
-    f.close(); // all done, close the file
   } else {
-    // 1D set-up: allocate strip length and fill with entries from file
-    // partial maps leave indices beyond customMappingSize unmapped (-1)  TODO: see note above about appending unmapped pixels
-    const unsigned mapSize = getLengthTotal();
-    customMappingTable = static_cast<uint16_t*>(d_malloc(sizeof(uint16_t) * mapSize)); // prefer DRAM for speed
-
-    if (customMappingTable) {
-      memset(customMappingTable, 0xFF, sizeof(uint16_t) * mapSize); // pre-fill with "-1" i.e. unmapped pixel
-      DEBUG_PRINTF_P(PSTR("ledmap allocated: %uB\n"), sizeof(uint16_t)*mapSize);
-      File f = WLED_FS.open(fileName, "r");
-      if (f && f.find("\"map\"")) { // advance to "map", readNextIntFromFile discards any chars up to the first number
-        int value;
-        unsigned mapindex = 0;
-        while (mapindex < mapSize && readNextIntFromFile(f, value)) {
-          if (value < 0 || value >= _length) value = 0xFFFF; // prevent integer wrap around
-          customMappingTable[mapindex++] = (uint16_t)value;
-        }
-        customMappingSize = mapSize;
-        currentLedmap = n;
-        f.close();
-      }
-    } else {
-      DEBUG_PRINTLN(F("ERROR LED map allocation error."));
-    }
+    _logicalLength = _length;
   }
 
-  #ifdef WLED_DEBUG
-  if (customMappingSize) {
-    DEBUG_PRINT(F("Loaded ledmap:"));
-    for (unsigned i=0; i<customMappingSize; i++) {
-      if (!(i%Segment::maxWidth)) DEBUG_PRINTLN();
-      DEBUG_PRINTF_P(PSTR("%4d,"), customMappingTable[i] < 0xFFFFU ? customMappingTable[i] : -1);
+  if (_logicalLength > 0 && loadInvMapFromFile(n)) {
+    _hasCustomFileMap = true;
+    currentLedmap = n;
+    #ifdef WLED_DEBUG
+    DEBUG_PRINT(F("Loaded invMap:"));
+    for (unsigned i = 0; i < _invMappingSize; i++) {
+      if (!(i % Segment::maxWidth)) DEBUG_PRINTLN();
+      DEBUG_PRINTF_P(PSTR("%4d,"), _invMappingTable[i] < 0xFFFFU ? _invMappingTable[i] : -1);
     }
     DEBUG_PRINTLN();
+    #endif
   }
-  #endif
 
   if (strip.getLengthTotal() != lengthTotalBefore)
-    strip.updatePixelBuffer(); // allocate _pixels[] to match new length
-  return (customMappingSize > 0);
+    strip.updatePixelBuffer();
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+  _physMapHash = 0;
+  ensurePhysMapValid(); // builds _physMap and releases transient _invMappingTable
+#endif
+  return _hasCustomFileMap;
 }
 
 

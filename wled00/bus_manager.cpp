@@ -350,6 +350,115 @@ void BusDigital::clearPixels() {
 
 //If LEDs are skipped, it is possible to use the first as a status LED.
 //TODO only show if no new show due in the next 50ms
+void Bus::updateFromBuffer(const PullPixelContext &ctx) {
+  if (!_valid) return;
+  const int oldCCT = Bus::getCCT();
+  uint8_t lastCCT = 0;
+  bool hasLastCCT = false;
+  for (uint16_t p = 0; p < _len; ++p) {
+    uint8_t pixCCT = 127;
+    const uint32_t c = ctx.pullPixel(_start + p, pixCCT);
+    if (!ctx.uniformCCT && (!hasLastCCT || pixCCT != lastCCT)) {
+      BusManager::setSegmentCCT(pixCCT, ctx.correctWB);
+      lastCCT = pixCCT;
+      hasLastCCT = true;
+    }
+    setPixelColor(p, c);
+  }
+  if (!ctx.uniformCCT) Bus::setCCT(oldCCT);
+}
+
+void BusDigital::updateFromBuffer(const PullPixelContext &ctx) {
+  if (!_valid || !_busPtr) return;
+
+  _colorSum = 0;
+  const uint8_t busBri = gamma8inv(_busPtr->getBusBri());
+  const uint8_t* gt = applyGamma ? NeoGammaWLEDMethod::gammaTable() : nullptr;
+  const WLEDpixelBus::ColorEncoder& enc = _busPtr->getEncoder();
+  const uint8_t pixelFormat = enc.getPixelFormat();
+  uint8_t* pixelData = _busPtr->getPixelData();
+
+  // Fast path: 8-bit 3-channel RGB without color-order map, inversion, white/CCT, ABL, or per-pixel CCT
+  if (pixelData && _busPtr->usesRawPixelBuffer() && pixelFormat == 3 && !_hasColorOrderMap &&
+      !enc.hasInvertedChannels() && !hasWhite() && !hasCCT() && !BusManager::_useABL &&
+      ctx.uniformCCT && Bus::_cct < 1900) {
+    const uint8_t idxR = enc.idxR();
+    const uint8_t idxG = enc.idxG();
+    const uint8_t idxB = enc.idxB();
+    const int step = _reversed ? -3 : 3;
+    uint8_t* out = pixelData + (size_t)(_reversed ? (_skip + _len - 1) : _skip) * 3;
+    const uint8_t briScale = (uint8_t)(busBri + 1);
+
+    for (uint16_t p = 0; p < _len; ++p, out += step) {
+      uint8_t unusedCCT = 127;
+      uint32_t c = ctx.pullPixel(_start + p, unusedCCT);
+      if (c == 0 || busBri == 0) {
+        out[0] = 0; out[1] = 0; out[2] = 0;
+        continue;
+      }
+      if (busBri < 255) c = fast_color_scale(c, briScale);
+      uint8_t r = R(c), g = G(c), b = B(c);
+      if (gt) { r = gt[r]; g = gt[g]; b = gt[b]; }
+      out[idxR] = r;
+      out[idxG] = g;
+      out[idxB] = b;
+    }
+    return;
+  }
+
+  // General path: RGBW, CCT, 16-bit, ABL, color-order map, ESP8266 DMA, per-pixel CCT, inverted channels
+  const int oldCCT = Bus::getCCT();
+  uint8_t lastCCT = 0;
+  bool hasLastCCT = false;
+  const bool busHasWhite = hasWhite();
+  const bool useABL = BusManager::_useABL;
+  const uint8_t numChannels = hasCCT() ? 5 : (busHasWhite ? 4 : 3);
+  const uint8_t briScale = (uint8_t)(busBri + 1);
+
+  for (uint16_t p = 0; p < _len; ++p) {
+    const unsigned globalPix = _start + p;
+    uint8_t pixCCT = 127;
+    uint32_t c = ctx.pullPixel(globalPix, pixCCT);
+
+    if (!ctx.uniformCCT && (!hasLastCCT || pixCCT != lastCCT)) {
+      BusManager::setSegmentCCT(pixCCT, ctx.correctWB);
+      lastCCT = pixCCT;
+      hasLastCCT = true;
+    }
+
+    unsigned busPix = _reversed ? (_len - p - 1) : p;
+    busPix += _skip;
+
+    CctPixel cct{};
+    if (c > 0 && busBri > 0) {
+      if (busBri < 255) c = fast_color_scale(c, briScale);
+      if (gt) {
+        c = RGBW32(gt[R(c)], gt[G(c)], gt[B(c)], gt[W(c)]);
+      }
+      if (Bus::_cct >= 1900) c = colorBalanceFromKelvin(Bus::_cct, c);
+      if (busHasWhite) c = autoWhiteCalc(c, cct.ww, cct.cw);
+      if (useABL) {
+        const uint8_t r = R(c), g = G(c), b = B(c);
+        if (_milliAmpsPerLed < 255) {
+          _colorSum += r + g + b + W(c);
+        } else {
+          _colorSum += ((r > g) ? ((r > b) ? r : b) : ((g > b) ? g : b));
+        }
+      }
+    } else {
+      c = 0;
+    }
+
+    if (__builtin_expect(_hasColorOrderMap, 0)) {
+      const uint8_t colorOrder = _colorOrderMap.getPixelColorOrder(globalPix, _colorOrder);
+      translateLegacyColorOrder(c, cct, colorOrder, _colorOrder, numChannels, _protocolType);
+    }
+
+    _busPtr->setPixelColor(busPix, c, cct.wwcw);
+  }
+  if (!ctx.uniformCCT) Bus::setCCT(oldCCT);
+}
+
 void BusDigital::setStatusPixel(uint32_t c) {
   if (_valid && _skip) {
     _busPtr->setPixelColor(0, c, 0);
@@ -1713,9 +1822,16 @@ void BusManager::show() {
 void BusManager::blank() {
   // Set all pixels to black
   for (auto &bus : busses) {
+    if (bus->isDigital()) { bus->clearPixels(); continue; }
     for (uint16_t pix = 0; pix < bus->getLength(); ++pix) {
       bus->setPixelColor(pix, BLACK);
     }
+  }
+}
+
+void IRAM_ATTR BusManager::updateFromBuffer(const PullPixelContext &ctx) {
+  for (auto &bus : busses) {
+    bus->updateFromBuffer(ctx);
   }
 }
 

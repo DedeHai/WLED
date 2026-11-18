@@ -281,6 +281,11 @@ public:
   bool    is16Bit()             const { return (_pixelFormat & NCHF_16BIT) != 0; } // true for UCS8903/8904/SM16825
   bool    hasInvertedChannels() const { return _invertMask != 0; } // bus with at least one inverted color channel
   bool    isCustom()            const { return (_pixelFormat & NCHF_CUSTOM) != 0; } // true for non-permutation custom channel maps
+  uint8_t idxR()                const { return _idxR; }
+  uint8_t idxG()                const { return _idxG; }
+  uint8_t idxB()                const { return _idxB; }
+  uint8_t idxW()                const { return _idxW; }
+  uint8_t idxCW()               const { return _idxCW; }
 
 private:
   uint8_t _pixelFormat; // lower nibble = bytes per pixel, upper nibble = NCHF_ flags (16-bit, custom)
@@ -353,6 +358,9 @@ public:
   void setBusBri(uint8_t b) { _busBri = b; }
   void setEncBri(uint16_t b) { _encBri = b; }
   inline uint8_t getBusBri() const { return _busBri; }
+  virtual bool usesRawPixelBuffer() const { return true; }
+  uint8_t* getPixelData() { return _pixelData; }
+  const ColorEncoder& getEncoder() const { return _encoder; }
   // Set APA102 5-bit per-pixel hardware brightness step (0–31), default implementation is a no-op; overridden by SpiBus for TYPE_APA102
   // coarse control via hardware step, fine via color_fade() - is set globally, same value is used for all pixels
   // Note: APA102 would effectively have 13bit per-color resolution we could leverage for smoother dimming

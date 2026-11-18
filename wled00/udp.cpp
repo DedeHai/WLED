@@ -419,6 +419,7 @@ void realtimeLock(uint32_t timeoutMs, byte md)
     } else {
       // clear entire strip
       strip.fill(BLACK);
+      if (realtimeRespectLedMaps) strip.prepareRealtimeMapping(true);
     }
     // if strip is off (bri==0) and not already in RTM
     if (briT16 == 0) {
@@ -442,6 +443,7 @@ void exitRealtime() {
   if (realtimeOverride == REALTIME_OVERRIDE_ONCE) realtimeOverride = REALTIME_OVERRIDE_NONE;
   realtimeTimeout = 0; // cancel realtime mode immediately
   realtimeMode = REALTIME_MODE_INACTIVE; // inform UI immediately
+  strip.prepareRealtimeMapping(false);
   BusManager::updateGammaUse();
   strip.setBrightness(bri, true);
   realtimeIP[0] = 0;

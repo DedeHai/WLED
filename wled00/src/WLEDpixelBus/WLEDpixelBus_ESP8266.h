@@ -75,6 +75,7 @@ public:
   const char* getTypeStr() const override { return "DMA"; }
 #endif
 
+  bool usesRawPixelBuffer() const override { return false; }
   IRAM_ATTR bool setPixelColor(uint16_t pos, uint32_t c, uint16_t wwcw) override;
   IRAM_ATTR uint32_t getPixelColor(uint16_t pix) const override;
   bool allocateEncodeBuffer(uint16_t numPixels, uint8_t bytesPerPixel) override;

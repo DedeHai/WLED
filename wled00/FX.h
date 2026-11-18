@@ -865,8 +865,11 @@ class WS2812FX {
       cctFromRgb(false),
       _currentSegment(nullptr),
       // true private variables
-      _pixels(nullptr),
-      _pixelCCT(nullptr),
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+      _physMap(nullptr),
+      _physMapHash(0),
+      _physMapLen(0),
+#endif
       _suspend(false),
       _brightness16(DEFAULT_BRIGHTNESS << 8),
       _length(DEFAULT_LED_COUNT),
@@ -882,6 +885,11 @@ class WS2812FX {
       _modeCount(MODE_COUNT),
       _segment_index(0),
       _mainSegment(0),
+      _invMappingTable(nullptr),
+      _invMappingSize(0),
+      _logicalLength(0),
+      _hasPanelGaps(false),
+      _hasCustomFileMap(false),
       customMappingSize(0),
       customMappingTable(nullptr),
       _lastShow(0),
@@ -894,8 +902,10 @@ class WS2812FX {
     }
 
     ~WS2812FX() {
-      p_free(_pixels);
-      p_free(_pixelCCT); // just in case
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+      p_free(_physMap);
+#endif
+      d_free(_invMappingTable);
       d_free(customMappingTable);
       _mode.clear();
       _modeData.clear();
@@ -921,25 +931,19 @@ class WS2812FX {
       resetSegments(),                            // marks all segments for reset
       makeAutoSegments(bool forceReset = false),  // will create segments based on configured outputs
       fixInvalidSegments(),                       // fixes incorrect segment configuration
-      blendSegment(const Segment &topSegment) const,    // blends topSegment into pixels
+      prepareRealtimeMapping(bool enterRealtime), // swaps mapping direction for realtimeMode when needed
       show(),                                     // initiates LED output
       setTargetFps(unsigned fps),
       setupEffectData(),                          // add default effects to the list; defined in FX.cpp
       waitForIt();                                // wait until frame is over (service() has finished or time for 1 frame has passed)
 
     void setRealtimePixelColor(unsigned i, uint32_t c);
-    inline void setPixelColor(unsigned n, uint32_t c) const   {
-      #ifdef WLED_DISABLE_GLOBAL_PIXELBUFFER
-      n = getMappedPixelIndex(n); if (n < getLengthTotal()) BusManager::setPixelColor(n, c);
-      #else
-      if (n < getLengthTotal()) _pixels[n] = c;
-      #endif
-    }  // paints absolute strip pixel with index n and color c
+    void setPixelColor(unsigned n, uint32_t c) const; // paints absolute strip pixel with index n and color c
     inline void resetTimebase()                               { timebase = 0UL - millis(); }
     inline void setPixelColor(unsigned n, uint8_t r, uint8_t g, uint8_t b, uint8_t w = 0) const
                                                               { setPixelColor(n, RGBW32(r,g,b,w)); }
     inline void setPixelColor(unsigned n, CRGB c) const       { setPixelColor(n, c.red, c.green, c.blue); }
-    inline void fill(uint32_t c) const                        { for (size_t i = 0; i < getLengthTotal(); i++) setPixelColor(i, c); } // fill whole strip with color (inline)
+    inline void fill(uint32_t c) const                        { if (c == BLACK) { BusManager::blank(); return; } for (size_t i = 0; i < getLengthTotal(); i++) setPixelColor(i, c); }
     inline void trigger()                                     { _triggered = true; }  // Forces the next frame to be computed on all active segments.
     inline void setTransition(uint16_t t)                     { _transitionDur = t; } // sets transition time (in ms)
     inline void appendSegment(uint16_t sStart=0, uint16_t sStop=30, uint16_t sStartY = 0, uint16_t sStopY = 1)
@@ -991,26 +995,16 @@ class WS2812FX {
     inline uint16_t getMinShowDelay() const { return MIN_FRAME_DELAY; }   // returns minimum amount of time strip.service() can be delayed (constant)
     inline uint16_t getLength() const       { return _length; }           // returns actual amount of LEDs on a strip (2D matrix may have less LEDs than W*H)
     inline uint16_t getTransition() const   { return _transitionDur; }    // returns currently set transition duration time (in ms)
+    uint16_t findPhysicalPixel(uint16_t logIdx) const;
+    uint16_t findLogicalPixel(uint16_t physIdx) const;
     inline uint16_t getMappedPixelIndex(uint16_t index) const {           // convert logical address to physical
-      if (index < customMappingSize && (realtimeMode == REALTIME_MODE_INACTIVE || realtimeRespectLedMaps)) index = customMappingTable[index];
+      if (realtimeMode == REALTIME_MODE_INACTIVE || realtimeRespectLedMaps) return findPhysicalPixel(index);
       return index;
     };
 
     unsigned long now, timebase;
-    inline uint32_t getPixelColor(unsigned n) const {
-      #ifdef WLED_DISABLE_GLOBAL_PIXELBUFFER
-      n = getMappedPixelIndex(n); return n < getLengthTotal() ? BusManager::getPixelColor(n) : 0;
-      #else
-      return (getMappedPixelIndex(n) < getLengthTotal()) ? _pixels[n] : 0;
-      #endif
-    } // returns color of pixel n, black if out of (mapped) bounds
-    inline uint32_t getPixelColorNoMap(unsigned n) const {
-      #ifdef WLED_DISABLE_GLOBAL_PIXELBUFFER
-      return (n < getLengthTotal()) ? BusManager::getPixelColor(n) : 0;
-      #else
-      return (n < getLengthTotal()) ? _pixels[n] : 0;
-      #endif
-    } // ignores mapping table
+    uint32_t getPixelColor(unsigned n) const;      // returns color of logical pixel n
+    uint32_t getPixelColorNoMap(unsigned n) const; // returns color of physical pixel n
     inline uint32_t getLastShow() const             { return _lastShow; }                 // returns millis() timestamp of last strip.show() call
 
     const char *getModeData(unsigned id = 0) const  { return (id && id < _modeCount) ? _modeData[id] : PSTR("Solid"); }
@@ -1066,8 +1060,47 @@ class WS2812FX {
     Segment *_currentSegment;
 
   private:
-    uint32_t *_pixels;
-    uint8_t  *_pixelCCT;
+    struct SegRenderState {
+      const Segment*  segO;
+      const uint32_t* pixels;
+      const uint32_t* pixelsO;
+      uint16_t start, stop;
+      uint16_t startY, stopY;
+      uint16_t width, height;
+      uint16_t length;
+      uint16_t nCols, nRows;
+      uint16_t oCols, oRows;
+      uint16_t offset;
+      uint16_t pushOffsetX, pushOffsetY;
+      uint16_t clipStart, clipStop, clipStartY, clipStopY;
+      uint16_t spatialProg, progInv;
+      uint8_t  opacity, opacityOld;
+      uint8_t  cct;
+      uint8_t  blendMode;
+      uint8_t  style;
+      uint8_t  grouping, groupLen;
+      bool     is2DSeg;
+      bool     reverse, reverse_y, transpose, mirror, mirror_y;
+      bool     invertClipping, fadeOldDiffMode;
+      bool     powerOffTrans, powerOnTrans;
+      bool     isSimple;
+    };
+
+    static inline bool resolveSegmentVirtualCoord(const SegRenderState &s, uint16_t logIdx, uint16_t x, uint16_t y, bool is2DCoord, uint16_t &outC, uint16_t &outR);
+    uint16_t panelPhysToLogical(uint16_t phys) const;
+    uint16_t panelLogicalToPhys(uint16_t logIdx) const;
+    bool loadInvMapFromFile(unsigned n);
+    bool loadForwardMapFromFile(unsigned n);
+    void buildFrameStates(SegRenderState* states, const uint32_t** segPixels, uint8_t* segOpacity, uint8_t* segCCT, uint8_t &numActive, bool &uniformCCT, uint8_t &uniformCCTVal) const;
+    uint32_t composeLogicalPixel(uint32_t logOrXY, bool is2DXY, const SegRenderState* states, uint8_t numActive, uint8_t &outCCT) const;
+    static uint32_t composeSlowCallback(const void* fxPtr, uint32_t logOrXY, bool is2DXY, uint8_t &outCCT);
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+    void rebuildPhysMap();
+    void ensurePhysMapValid();
+    uint32_t *_physMap;
+    uint32_t  _physMapHash;
+    uint16_t  _physMapLen;
+#endif
     std::vector<Segment> _segments;
 
     volatile bool _suspend;
@@ -1093,8 +1126,15 @@ class WS2812FX {
     uint8_t _segment_index;
     uint8_t _mainSegment;
 
+    uint16_t* _invMappingTable;
+    uint16_t  _invMappingSize;
+    uint16_t  _logicalLength;
+    bool      _hasPanelGaps;
+    bool      _hasCustomFileMap;
     uint16_t  customMappingSize;
     uint16_t* customMappingTable;
+    const SegRenderState* _frameStates = nullptr;
+    uint8_t               _frameNumActive = 0;
 
     unsigned long _lastShow;
     unsigned long _lastServiceShow;
