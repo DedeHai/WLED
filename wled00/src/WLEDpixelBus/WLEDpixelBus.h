@@ -281,6 +281,11 @@ public:
   bool    is16Bit()             const { return (_pixelFormat & NCHF_16BIT) != 0; } // true for UCS8903/8904/SM16825
   bool    hasInvertedChannels() const { return _invertMask != 0; } // bus with at least one inverted color channel
   bool    isCustom()            const { return (_pixelFormat & NCHF_CUSTOM) != 0; } // true for non-permutation custom channel maps
+  uint8_t idxR()                const { return _idxR; }
+  uint8_t idxG()                const { return _idxG; }
+  uint8_t idxB()                const { return _idxB; }
+  uint8_t idxW()                const { return _idxW; }
+  uint8_t idxCW()               const { return _idxCW; }
 
 private:
   uint8_t _pixelFormat; // lower nibble = bytes per pixel, upper nibble = NCHF_ flags (16-bit, custom)
@@ -361,6 +366,9 @@ public:
   virtual void setInverted(bool inv) { _inverted = inv; }
   bool isInverted() const { return _inverted; }
   void setEncoder(const ColorEncoder& enc) { _encoder = enc; } // must be called after construction but before begin().
+  virtual bool usesRawPixelBuffer() const { return true; }
+  uint8_t* getPixelData() const { return _pixelData; }
+  const ColorEncoder& getEncoder() const { return _encoder; }
 
   virtual bool begin() = 0;
   virtual void end() = 0;

@@ -396,6 +396,101 @@ void BusDigital::setPixelColor(unsigned pix, uint32_t c) {
   _busPtr->setPixelColor(pix, c, cct.wwcw);
 }
 
+void BusDigital::updateFromBuffer(const uint32_t* pixels, size_t totalLen, const uint8_t* pixelCCT, bool correctWB, const uint16_t* invMap, uint16_t invMapLen) {
+  if (!_valid || !_busPtr || !pixels || _len == 0) return;
+  const uint16_t* busInvMap = (invMap && (_start + _len) <= invMapLen) ? (invMap + _start) : nullptr;
+  const uint8_t bri = gamma8inv(_busPtr->getBusBri());
+  const uint32_t briScale = (uint32_t)bri + 1;
+  const uint8_t* gammaT = applyGamma ? NeoGammaWLEDMethod::gammaTable() : nullptr;
+  const bool doWhite = hasWhite();
+  const bool doABL = BusManager::_useABL;
+  const bool wackyWS2815 = (_milliAmpsPerLed >= 255);
+  const bool doColorOrderMap = _hasColorOrderMap;
+  const WLEDpixelBus::ColorEncoder& enc = _busPtr->getEncoder();
+  const uint8_t pixelFormat = enc.getPixelFormat();
+  uint8_t* pixelData = _busPtr->getPixelData();
+
+  // Fast path: 8-bit 3-channel RGB, no white/CCT, no per-pixel CCT, no ColorOrderMap, direct byte buffer
+  if (pixelData && _busPtr->usesRawPixelBuffer() && pixelFormat == 3 && !doWhite && !pixelCCT && !doColorOrderMap) {
+    const bool doKelvin = (Bus::_cct >= 1900);
+    const uint8_t idxR = enc.idxR(), idxG = enc.idxG(), idxB = enc.idxB();
+    const int stride = _reversed ? -3 : 3;
+    uint8_t* out = pixelData + ((size_t)(_skip + (_reversed ? (_len - 1) : 0)) * 3);
+    uint32_t colorSum = _colorSum;
+
+    for (unsigned pix = 0; pix < _len; pix++, out += stride) {
+      const uint16_t logIdx = busInvMap ? busInvMap[pix] : (uint16_t)(_start + pix);
+      const uint32_t c0 = (logIdx < totalLen) ? pixels[logIdx] : 0;
+      if (c0 == 0) {
+        out[idxR] = 0; out[idxG] = 0; out[idxB] = 0;
+        continue;
+      }
+      uint32_t c = c0;
+      if (bri < 255) {
+        const uint32_t rb = ((c & 0x00FF00FFu) * briScale) >> 8;
+        const uint32_t wg = ((c >> 8) & 0x00FF00FFu) * briScale;
+        c = (rb & 0x00FF00FFu) | (wg & 0xFF00FF00u);
+      }
+      uint8_t r = R(c), g = G(c), b = B(c);
+      if (gammaT) {
+        r = gammaT[r]; g = gammaT[g]; b = gammaT[b];
+      }
+      if (doKelvin) {
+        const uint32_t kc = colorBalanceFromKelvin(Bus::_cct, RGBW32(r, g, b, 0));
+        r = R(kc); g = G(kc); b = B(kc);
+      }
+      if (doABL) {
+        if (!wackyWS2815) colorSum += (uint32_t)r + g + b;
+        else              colorSum += ((r > g) ? ((r > b) ? r : b) : ((g > b) ? g : b));
+      }
+      out[idxR] = r;
+      out[idxG] = g;
+      out[idxB] = b;
+    }
+    _colorSum = colorSum;
+    return;
+  }
+
+  // General path: RGBW, CCT, 16-bit, custom channel maps, ColorOrderMap, per-pixel CCT, or Esp8266DmaBus
+  const uint8_t numChannels = hasCCT() ? 5 : (doWhite ? 4 : 3);
+  int16_t lastCCT = -2;
+  uint32_t colorSum = _colorSum;
+
+  for (unsigned pix = 0; pix < _len; pix++) {
+    const uint16_t logIdx = busInvMap ? busInvMap[pix] : (uint16_t)(_start + pix);
+    uint32_t c = (logIdx < totalLen) ? pixels[logIdx] : 0;
+    CctPixel cct{};
+    if (c > 0) {
+      if (pixelCCT && pixelCCT[logIdx] != lastCCT) {
+        lastCCT = pixelCCT[logIdx];
+        BusManager::setSegmentCCT(lastCCT, correctWB);
+      }
+      if (bri < 255) {
+        const uint32_t rb = ((c & 0x00FF00FFu) * briScale) >> 8;
+        const uint32_t wg = ((c >> 8) & 0x00FF00FFu) * briScale;
+        c = (rb & 0x00FF00FFu) | (wg & 0xFF00FF00u);
+      }
+      if (gammaT) {
+        c = RGBW32(gammaT[R(c)], gammaT[G(c)], gammaT[B(c)], gammaT[W(c)]);
+      }
+      if (Bus::_cct >= 1900) c = colorBalanceFromKelvin(Bus::_cct, c);
+      if (doWhite) c = autoWhiteCalc(c, cct.ww, cct.cw);
+      if (doABL) {
+        const uint8_t r = R(c), g = G(c), b = B(c);
+        if (!wackyWS2815) colorSum += r + g + b + W(c);
+        else              colorSum += ((r > g) ? ((r > b) ? r : b) : ((g > b) ? g : b));
+      }
+    }
+    if (__builtin_expect(doColorOrderMap, 0)) {
+      const uint8_t colorOrder = _colorOrderMap.getPixelColorOrder(_start + pix, _colorOrder);
+      translateLegacyColorOrder(c, cct, colorOrder, _colorOrder, numChannels, _protocolType);
+    }
+    const unsigned outPix = (_reversed ? (_len - pix - 1) : pix) + _skip;
+    _busPtr->setPixelColor(outPix, c, cct.wwcw);
+  }
+  _colorSum = colorSum;
+}
+
 // returns lossly restored color from bus
 uint32_t IRAM_ATTR BusDigital::getPixelColor(unsigned pix) const {
   if (!_valid) return 0;
@@ -1716,6 +1811,30 @@ void BusManager::blank() {
     for (uint16_t pix = 0; pix < bus->getLength(); ++pix) {
       bus->setPixelColor(pix, BLACK);
     }
+  }
+}
+
+void Bus::updateFromBuffer(const uint32_t* pixels, size_t totalLen, const uint8_t* pixelCCT, bool correctWB, const uint16_t* invMap, uint16_t invMapLen) {
+  if (!_valid || !pixels || _len == 0) return;
+  const uint16_t* busInvMap = (invMap && (_start + _len) <= invMapLen) ? (invMap + _start) : nullptr;
+  int16_t lastCCT = -2;
+  for (unsigned pix = 0; pix < _len; pix++) {
+    const uint16_t logIdx = busInvMap ? busInvMap[pix] : (uint16_t)(_start + pix);
+    if (logIdx >= totalLen) {
+      setPixelColor(pix, 0);
+      continue;
+    }
+    if (pixelCCT && pixelCCT[logIdx] != lastCCT) {
+      lastCCT = pixelCCT[logIdx];
+      BusManager::setSegmentCCT(lastCCT, correctWB);
+    }
+    setPixelColor(pix, pixels[logIdx]);
+  }
+}
+
+void BusManager::updateFromBuffer(const uint32_t* pixels, size_t totalLen, const uint8_t* pixelCCT, bool correctWB, const uint16_t* invMap, uint16_t invMapLen) {
+  for (auto &bus : busses) {
+    bus->updateFromBuffer(pixels, totalLen, pixelCCT, correctWB, invMap, invMapLen);
   }
 }
 

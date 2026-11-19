@@ -884,6 +884,10 @@ class WS2812FX {
       _mainSegment(0),
       customMappingSize(0),
       customMappingTable(nullptr),
+    #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+      _invMappingSize(0),
+      _invMappingTable(nullptr),
+    #endif
       _lastShow(0),
       _lastServiceShow(0)
     {
@@ -897,6 +901,9 @@ class WS2812FX {
       p_free(_pixels);
       p_free(_pixelCCT); // just in case
       d_free(customMappingTable);
+    #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+      d_free(_invMappingTable);
+    #endif
       _mode.clear();
       _modeData.clear();
       _segments.clear();
@@ -1050,6 +1057,7 @@ class WS2812FX {
 #endif
 
     void setUpMatrix();     // sets up automatic matrix ledmap from panel configuration
+    void rebuildInvertedMap();
 
     inline void     setPixelColorXY(unsigned x, unsigned y, uint32_t c) const { setPixelColor(y * Segment::maxWidth + x, c); }
     inline void     setPixelColorXY(unsigned x, unsigned y, byte r, byte g, byte b, byte w = 0) const { setPixelColorXY(x, y, RGBW32(r,g,b,w)); }
@@ -1095,6 +1103,10 @@ class WS2812FX {
 
     uint16_t  customMappingSize;
     uint16_t* customMappingTable;
+  #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+    uint16_t  _invMappingSize;
+    uint16_t* _invMappingTable;
+  #endif
 
     unsigned long _lastShow;
     unsigned long _lastServiceShow;

@@ -125,6 +125,7 @@ class Bus {
     virtual void     clearPixels()                              {} // zero encode buffer to black (no-op for non-digital buses)
     virtual void     setStatusPixel(uint32_t c)                 {}
     virtual void     setPixelColor(unsigned pix, uint32_t c)    = 0;
+    virtual void     updateFromBuffer(const uint32_t* pixels, size_t totalLen, const uint8_t* pixelCCT, bool correctWB, const uint16_t* invMap, uint16_t invMapLen);
     virtual void     setBrightness(uint8_t b)                   { setBrightness16((uint16_t)b << 8); };
     virtual void     setBrightness16(uint16_t b)                { _bri16 = b; };
     virtual void     setColorOrder(uint8_t co)                  {}
@@ -241,6 +242,7 @@ class BusDigital : public Bus {
     void clearPixels() override;
     void setStatusPixel(uint32_t c) override;
     [[gnu::hot]] void setPixelColor(unsigned pix, uint32_t c) override;
+    [[gnu::hot]] void updateFromBuffer(const uint32_t* pixels, size_t totalLen, const uint8_t* pixelCCT, bool correctWB, const uint16_t* invMap, uint16_t invMapLen) override;
     void setColorOrder(uint8_t colorOrder) override;
     [[gnu::hot]] uint32_t getPixelColor(unsigned pix) const override;
     uint8_t  getColorOrder() const override  { return _colorOrder; }
@@ -483,6 +485,7 @@ namespace BusManager {
 
   void updateGammaUse(bool forceTableUpdate = false);
   [[gnu::hot]] void     setPixelColor(unsigned pix, uint32_t c);
+  [[gnu::hot]] void     updateFromBuffer(const uint32_t* pixels, size_t totalLen, const uint8_t* pixelCCT, bool correctWB, const uint16_t* invMap, uint16_t invMapLen);
   [[gnu::hot]] uint32_t getPixelColor(unsigned pix);
   void        clearPixels(size_t n); // zero all bus encode buffers for first n physical pixels
   void        show();

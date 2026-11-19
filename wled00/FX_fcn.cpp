@@ -1964,14 +1964,18 @@ void WS2812FX::show() {
   if (cctFromRgb) BusManager::setSegmentCCT(-1);
   else if (!_pixelCCT) BusManager::setSegmentCCT(uniformCCT, correctWB); // uniform CCT: set once before loop
 
-  for (size_t i = 0; i < totalLen; i++) {
-    // when correctWB is true setSegmentCCT() will convert CCT into K with which we can then
-    // correct/adjust RGB value according to desired CCT value, it will still affect actual WW/CW ratio
-    if (_pixelCCT) { // cctFromRgb already excluded at allocation
-      if (i == 0 || _pixelCCT[i-1] != _pixelCCT[i]) BusManager::setSegmentCCT(_pixelCCT[i], correctWB);
+  const bool useLedmap = (customMappingSize > 0 && (realtimeMode == REALTIME_MODE_INACTIVE || realtimeRespectLedMaps));
+  if (!useLedmap || _invMappingTable) {
+    BusManager::updateFromBuffer(_pixels, totalLen, _pixelCCT, correctWB, useLedmap ? _invMappingTable : nullptr, useLedmap ? _invMappingSize : 0);
+  } else {
+    // Fallback if inverted map allocation failed
+    for (size_t i = 0; i < totalLen; i++) {
+      if (_pixelCCT) {
+        if (i == 0 || _pixelCCT[i-1] != _pixelCCT[i]) BusManager::setSegmentCCT(_pixelCCT[i], correctWB);
+      }
+      uint32_t c = _pixels[i];
+      BusManager::setPixelColor(getMappedPixelIndex(i), c);
     }
-    uint32_t c = _pixels[i]; // need a copy, do not modify _pixels directly (no byte access allowed on ESP32)
-    BusManager::setPixelColor(getMappedPixelIndex(i), c);
   }
   Bus::setCCT(oldCCT);  // restore old CCT for ABL adjustments
 
@@ -2323,6 +2327,24 @@ void WS2812FX::printSize() {
 // load custom mapping table from JSON file (called from finalizeInit() or deserializeState())
 // if this is a matrix set-up and default ledmap.json file does not exist, create mapping table using setUpMatrix() from panel information
 // WARNING: effect drawing has to be suspended (strip.suspend()) or must be called from loop() context
+void WS2812FX::rebuildInvertedMap() {
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+  _invMappingSize = 0;
+  d_free(_invMappingTable);
+  _invMappingTable = nullptr;
+  if (customMappingSize == 0 || !customMappingTable || _length == 0) return;
+  _invMappingTable = static_cast<uint16_t*>(d_malloc(sizeof(uint16_t) * _length));
+  if (!_invMappingTable) return;
+  memset(_invMappingTable, 0xFF, sizeof(uint16_t) * _length);
+  for (uint16_t i = 0; i < customMappingSize; i++) {
+    const uint16_t phys = customMappingTable[i];
+    if (phys < _length) _invMappingTable[phys] = i;
+  }
+  for (uint16_t i = customMappingSize; i < _length; i++) _invMappingTable[i] = i;
+  _invMappingSize = _length;
+#endif
+}
+
 bool WS2812FX::deserializeMap(unsigned n) {
   char fileName[32];
   strcpy_P(fileName, PSTR("/ledmap"));
@@ -2343,7 +2365,7 @@ bool WS2812FX::deserializeMap(unsigned n) {
     return false;
   }
 
-  if (!isFile || !requestJSONBufferLock(JSON_LOCK_LEDMAP)) return false;
+  if (!isFile || !requestJSONBufferLock(JSON_LOCK_LEDMAP)) { rebuildInvertedMap(); return false; }
 
   StaticJsonDocument<64> filter;
   filter[F("width")]  = true;
@@ -2467,6 +2489,7 @@ bool WS2812FX::deserializeMap(unsigned n) {
   }
   #endif
 
+  rebuildInvertedMap();
   if (strip.getLengthTotal() != lengthTotalBefore)
     strip.updatePixelBuffer(); // allocate _pixels[] to match new length
   return (customMappingSize > 0);

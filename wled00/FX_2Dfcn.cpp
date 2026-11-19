@@ -139,6 +139,7 @@ void WS2812FX::setUpMatrix() {
       resetSegments();
     }
   }
+  rebuildInvertedMap();
 #else
   isMatrix = false; // no matter what config says
 #endif
