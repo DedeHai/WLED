@@ -14,6 +14,7 @@
  */
 
 #include "const.h"
+#include "colors.h"
 #include "bus_config.h"
 #include "pin_manager.h"
 #include <vector>
@@ -101,9 +102,44 @@ typedef struct {
 } LEDType;
 
 //parent class of BusDigital, BusPwm, and BusNetwork
-static constexpr uint8_t  PHYS_SEG_BLACK   = 254;
-static constexpr uint8_t  PHYS_SEG_COMPOSE = 255;
-static constexpr uint32_t PHYS_FLAG_2D     = 0x80000000u;
+// physMap layout: 3 bytes per pixel, split into two arrays.
+//
+//   _physOwner[]  1 B/px owner code (prefers internal RAM)
+//        0 .. 63                   direct owner -> index of the owning segment
+//        PHYS_SEG_BLACK            no segment covers this physical pixel
+//        PHYS_SEG_COMPOSE + 0      compose, 1D, affine fast path
+//        PHYS_SEG_COMPOSE + 1      compose, 1D, generic (slow) compose
+//        PHYS_SEG_COMPOSE + 2      compose, 2D, affine fast path
+//        PHYS_SEG_COMPOSE + 3      compose, 2D, generic (slow) compose
+//
+//   _physIdx[]    2 B/px payload (PSRAM when available)
+//        direct owner -> index into the owning segment's own pixel buffer
+//        compose      -> logical index (1D) or x | (y << 8) (2D)
+//
+// The previous 4 B/px uint32 entry spent two of its bits on flags (2D / generic compose).
+// Folding the four compose variants into the sentinel range instead frees those bits, so
+// the owner fits into a single byte for up to 64 segments (MAX_NUM_SEGMENTS) and the
+// whole entry shrinks from 4 B/px to 3 B/px.
+static constexpr uint8_t  PHYS_SEG_BLACK   = 64;
+static constexpr uint8_t  PHYS_SEG_COMPOSE = 65;
+
+
+// Compact per-segment render plan used by the bus layer's fast-path compose.
+// Everything in here is frame invariant: it is calculated once per frame by
+// WS2812FX::buildSegPlans() and is never re-derived per pixel.
+// The mapping of a logical pixel coordinate onto an index inside the segment's own
+// pixel buffer is affine:  index = base + tx * x + ty * y
+struct SegPlan {
+  const uint32_t* pixels;  // segment pixel buffer
+  int32_t  base;           // affine index origin
+  int32_t  tx;             // X coefficient
+  int32_t  ty;             // Y coefficient (0 for 1D segments)
+  uint16_t x0, x1;         // logical X range covered by the segment
+  uint16_t y0, y1;         // logical Y range covered by the segment (1D: 0..1)
+  uint8_t  opacity;
+  uint8_t  blendMode;
+  uint8_t  cct;
+};
 
 struct PullPixelContext {
   const uint32_t* const* segPixels;
@@ -114,33 +150,59 @@ struct PullPixelContext {
   bool                   correctWB;
   bool                   cctFromRgb;
 #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
-  const uint32_t*        physMap;
+  const uint8_t*         physOwner;
+  const uint16_t*        physIdx;
   uint16_t               physMapLen;
 #else
   const uint16_t*        invMap;
   uint16_t               invMapLen;
 #endif
+  const SegPlan*         plans;      // affine render plan, one entry per active segment
+  uint8_t                numPlans;
+  bool                   useAffine;  // true: every active segment has an affine plan
   uint32_t (*composeSlow)(const void* fxPtr, uint32_t logOrXY, bool is2DXY, uint8_t &outCCT);
   const void* fxPtr;
+
+  // Affine fast-path compose: blends every segment covering the given logical coordinate.
+  // No per-pixel coordinate arithmetic and no function call - all of it was hoisted into
+  // the plan. Segment order matches the generic compose, so results are identical.
+  inline uint32_t composeAffine(uint16_t x, uint16_t y, uint8_t &outCCT) const {
+    uint32_t accum = 0;
+    for (uint8_t s = 0; s < numPlans; s++) {
+      const SegPlan &pl = plans[s];
+      if (x < pl.x0 || x >= pl.x1 || y < pl.y0 || y >= pl.y1) continue;
+      const uint32_t c_a = pl.pixels[(int32_t)x * pl.tx + (int32_t)y * pl.ty + pl.base];
+      accum = color_blend(accum, segblend(pl.blendMode, c_a, accum), pl.opacity);
+      outCCT = pl.cct;
+    }
+    return accum;
+  }
 
   inline uint32_t pullPixel(uint16_t globalPix, uint8_t &outCCT) const {
 #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
     if (globalPix < physMapLen) {
-      const uint32_t entry = physMap[globalPix];
-      const uint8_t segIdx = (uint8_t)(entry >> 16);
-      if (segIdx < PHYS_SEG_BLACK) {
-        uint32_t c = segPixels[segIdx][entry & 0xFFFFu];
-        const uint8_t op = segOpacity[segIdx];
+      const uint8_t owner = physOwner[globalPix];
+      if (owner < PHYS_SEG_BLACK) {
+        uint32_t c = segPixels[owner][physIdx[globalPix]];
+        const uint8_t op = segOpacity[owner];
         if (op == 0) c = 0;
         else if (op < 255) {
           const uint8_t sc = (uint8_t)(op + 1);
           c = ((((c & 0x00FF00FFu) * sc) >> 8) & 0x00FF00FFu) | ((((c >> 8) & 0x00FF00FFu) * sc) & ~0x00FF00FFu);
         }
-        outCCT = segCCT[segIdx];
+        outCCT = segCCT[owner];
         return c;
       }
-      if (segIdx == PHYS_SEG_COMPOSE) {
-        return composeSlow(fxPtr, entry & 0xFFFFu, (entry & PHYS_FLAG_2D) != 0, outCCT);
+      if (owner > PHYS_SEG_BLACK) {
+        // owner - PHYS_SEG_COMPOSE: bit0 = needs the generic compose, bit1 = 2D coordinate
+        const uint8_t variant = (uint8_t)(owner - PHYS_SEG_COMPOSE);
+        const uint16_t idx = physIdx[globalPix];
+        if (useAffine && !(variant & 1u)) {
+          // affine fast path: 1D pixels carry a logical index, 2D pixels an (x,y) pair
+          if (variant & 2u) return composeAffine((uint16_t)(idx & 0xFFu), (uint16_t)(idx >> 8), outCCT);
+          return composeAffine(idx, 0, outCCT);
+        }
+        return composeSlow(fxPtr, idx, (variant & 2u) != 0, outCCT);
       }
     }
     return 0;

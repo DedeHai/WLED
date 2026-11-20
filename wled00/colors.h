@@ -68,6 +68,62 @@ class NeoGammaWLEDMethod {
 inline uint32_t color_blend16(uint32_t c1, uint32_t c2, uint16_t b) { return color_blend(c1, c2, b >> 8); };
 [[gnu::hot, gnu::pure]] uint32_t color_add(uint32_t, uint32_t, bool preserveCR = false);
 [[gnu::hot, gnu::pure]] uint32_t color_fade(uint32_t c1, uint8_t amount, bool video = false);
+
+// --- segment blending modes (see "bm" in index.js) ---
+// Moved here from FX_fcn.cpp so that the bus layer (affine fast-path compose) and the
+// FX layer (generic compose) share one implementation.
+// note: "static inline" keeps these local to each translation unit (no symbol clashes)
+// and avoids "unused function" warnings in TUs that do not use them.
+static inline uint8_t _top       (uint8_t a, uint8_t b) { return a; } // function unused
+static inline uint8_t _bottom    (uint8_t a, uint8_t b) { return b; } // function unused
+static inline uint8_t _add       (uint8_t a, uint8_t b) { unsigned t = a + b; return t > 255 ? 255 : t; } // function unused
+static inline uint8_t _subtract  (uint8_t a, uint8_t b) { return b > a ? (b - a) : 0; }
+static inline uint8_t _difference(uint8_t a, uint8_t b) { return b > a ? (b - a) : (a - b); }
+static inline uint8_t _average   (uint8_t a, uint8_t b) { return (a + b) >> 1; }
+#if !defined(WLED_HAVE_FAST_int_DIVIDE)
+static inline uint8_t _multiply  (uint8_t a, uint8_t b) { return ((a * b) + 255) >> 8; } // faster than division on C3/C5 but slightly less accurate
+#else
+static inline uint8_t _multiply  (uint8_t a, uint8_t b) { return (a * b) / 255; } // origianl uses a & b in range [0,1]
+#endif
+static inline uint8_t _divide    (uint8_t a, uint8_t b) { return a > b ? (b * 255) / a : 255; }
+static inline uint8_t _lighten   (uint8_t a, uint8_t b) { return a > b ? a : b; }
+static inline uint8_t _darken    (uint8_t a, uint8_t b) { return a < b ? a : b; }
+static inline uint8_t _screen    (uint8_t a, uint8_t b) { return 255 - _multiply(~a,~b); } // 255 - (255-a)*(255-b)/255
+static inline uint8_t _overlay   (uint8_t a, uint8_t b) { return b < 128 ? 2 * _multiply(a,b) : (255 - 2 * _multiply(~a,~b)); }
+static inline uint8_t _hardlight (uint8_t a, uint8_t b) { return a < 128 ? 2 * _multiply(a,b) : (255 - 2 * _multiply(~a,~b)); }
+#if !defined(WLED_HAVE_FAST_int_DIVIDE)
+static inline uint8_t _softlight (uint8_t a, uint8_t b) { return (((b * b * (255 - 2 * a))) + ((2 * a * b + 256) << 8)) >> 16; } // Pegtop's formula (1 - 2a)b^2
+#else
+static inline uint8_t _softlight (uint8_t a, uint8_t b) { return (b * b * (255 - 2 * a) + 255 * 2 * a * b) / (255 * 255); } // Pegtop's formula (1 - 2a)b^2 + 2ab
+#endif
+static inline uint8_t _dodge     (uint8_t a, uint8_t b) { return _divide(~a,b); }
+static inline uint8_t _burn      (uint8_t a, uint8_t b) { return ~_divide(a,~b); }
+static inline uint8_t _stencil   (uint8_t a, uint8_t b) { return a ? a : b; } // function unused
+static inline uint8_t _dummy     (uint8_t a, uint8_t b) { return a; } // dummy (same as _top) to fill the function list and make it safe from OOB access
+
+#define BLENDMODES  17 // number of blend modes must match "bm" in index.js, all cases must be handled in segblend()
+
+// blend top layer "t" over bottom layer "b" using the given blend mode
+static inline uint32_t segblend(uint8_t blendMode, uint32_t t, uint32_t b) {
+  typedef uint8_t(*FuncType)(uint8_t, uint8_t);
+  static const FuncType funcs[] = {
+    _dummy,      _dummy,     _dummy,    _subtract,
+    _difference, _average,   _dummy,    _divide,
+    _lighten,    _darken,    _screen,   _overlay,
+    _hardlight,  _softlight, _dodge,    _burn,
+    _dummy
+  };
+  if (blendMode >= BLENDMODES) blendMode = 0;
+  switch (blendMode) {
+    case 0 : return t;                   // top
+    case 1 : return b;                   // bottom
+    case 2 : return color_add(t,b,true); // add with preserve color ratio
+    case 6 : return RGBW32(_multiply(R(t),R(b)), _multiply(G(t),G(b)), _multiply(B(t),B(b)), _multiply(W(t),W(b)));
+    case 16: return t ? t : b;           // stencil
+  }
+  const FuncType func = funcs[blendMode];
+  return RGBW32(func(R(t),R(b)), func(G(t),G(b)), func(B(t),B(b)), func(W(t),W(b)));
+}
 void adjust_color(CRGBW& rgb, int32_t hueShift, int32_t satChange,int32_t valueChange);
 
 [[gnu::hot, gnu::pure]] uint32_t ColorFromPalette(const CRGBPalette16 &pal, unsigned index, uint8_t brightness = (uint8_t)255U, TBlendType blendType = LINEARBLEND);

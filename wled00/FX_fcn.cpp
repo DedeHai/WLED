@@ -13,6 +13,10 @@
 #include "FXparticleSystem.h"  // TODO: better define the required function (mem service) in FX.h?
 #include "colors.h"
 
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+static_assert(MAX_NUM_SEGMENTS <= 64, "physMap owner byte encodes at most 64 segment slots");
+#endif
+
 /*
   Custom per-LED mapping has moved!
 
@@ -1424,18 +1428,23 @@ void WS2812FX::finalizeInit() {
 
 void WS2812FX::updatePixelBuffer() {
 #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
-  p_free(_physMap);
-  _physMap = nullptr;
+  p_free(_physOwner);
+  p_free(_physIdx);
+  _physOwner = nullptr;
+  _physIdx = nullptr;
   _physMapLen = 0;
   _physMapHash = 0;
   if (_length > 0) {
-    const uint32_t requiredMem = (uint32_t)_length * sizeof(uint32_t);
-    _physMap = static_cast<uint32_t*>(allocate_buffer(requiredMem, BFRALLOC_ENFORCE_PSRAM | BFRALLOC_NOBYTEACCESS | BFRALLOC_CLEAR));
-    if (_physMap) {
+    _physOwner = static_cast<uint8_t*>(allocate_buffer(_length, BFRALLOC_PREFER_DRAM));
+    _physIdx = static_cast<uint16_t*>(allocate_buffer((size_t)_length * sizeof(uint16_t), BFRALLOC_ENFORCE_PSRAM | BFRALLOC_CLEAR));
+    if (_physOwner && _physIdx) {
       _physMapLen = _length;
-      for (uint16_t i = 0; i < _physMapLen; i++) _physMap[i] = (uint32_t)PHYS_SEG_BLACK << 16;
+      memset(_physOwner, PHYS_SEG_BLACK, _physMapLen);
+    } else {
+      p_free(_physOwner); _physOwner = nullptr;
+      p_free(_physIdx);   _physIdx = nullptr;
     }
-    DEBUG_PRINTF_P(PSTR("physMap buffer size: %uB\n"), requiredMem);
+    DEBUG_PRINTF_P(PSTR("physMap buffer size: %uB\n"), (uint32_t)_length * 3);
   }
 #endif
 }
@@ -1511,56 +1520,7 @@ void WS2812FX::service() {
   _isServicing = false;
 }
 
-// https://en.wikipedia.org/wiki/Blend_modes but using a for top layer & b for bottom layer
-static uint8_t _top       (uint8_t a, uint8_t b) { return a; } // function unused
-static uint8_t _bottom    (uint8_t a, uint8_t b) { return b; } // function unused
-static uint8_t _add       (uint8_t a, uint8_t b) { unsigned t = a + b; return t > 255 ? 255 : t; } // function unused
-static uint8_t _subtract  (uint8_t a, uint8_t b) { return b > a ? (b - a) : 0; }
-static uint8_t _difference(uint8_t a, uint8_t b) { return b > a ? (b - a) : (a - b); }
-static uint8_t _average   (uint8_t a, uint8_t b) { return (a + b) >> 1; }
-#if !defined(WLED_HAVE_FAST_int_DIVIDE)
-static uint8_t _multiply  (uint8_t a, uint8_t b) { return ((a * b) + 255) >> 8; } // faster than division on C3/C5 but slightly less accurate
-#else
-static uint8_t _multiply  (uint8_t a, uint8_t b) { return (a * b) / 255; } // origianl uses a & b in range [0,1]
-#endif
-static uint8_t _divide    (uint8_t a, uint8_t b) { return a > b ? (b * 255) / a : 255; }
-static uint8_t _lighten   (uint8_t a, uint8_t b) { return a > b ? a : b; }
-static uint8_t _darken    (uint8_t a, uint8_t b) { return a < b ? a : b; }
-static uint8_t _screen    (uint8_t a, uint8_t b) { return 255 - _multiply(~a,~b); } // 255 - (255-a)*(255-b)/255
-static uint8_t _overlay   (uint8_t a, uint8_t b) { return b < 128 ? 2 * _multiply(a,b) : (255 - 2 * _multiply(~a,~b)); }
-static uint8_t _hardlight (uint8_t a, uint8_t b) { return a < 128 ? 2 * _multiply(a,b) : (255 - 2 * _multiply(~a,~b)); }
-#if !defined(WLED_HAVE_FAST_int_DIVIDE)
-static uint8_t _softlight (uint8_t a, uint8_t b) { return (((b * b * (255 - 2 * a))) + ((2 * a * b + 256) << 8)) >> 16; } // Pegtop's formula (1 - 2a)b^2
-#else
-static uint8_t _softlight (uint8_t a, uint8_t b) { return (b * b * (255 - 2 * a) + 255 * 2 * a * b) / (255 * 255); } // Pegtop's formula (1 - 2a)b^2 + 2ab
-#endif
-static uint8_t _dodge     (uint8_t a, uint8_t b) { return _divide(~a,b); }
-static uint8_t _burn      (uint8_t a, uint8_t b) { return ~_divide(a,~b); }
-static uint8_t _stencil   (uint8_t a, uint8_t b) { return a ? a : b; } // function unused
-static uint8_t _dummy     (uint8_t a, uint8_t b) { return a; } // dummy (same as _top) to fill the function list and make it safe from OOB access
-
-#define BLENDMODES  17 // number of blend modes must match "bm" in index.js, all cases must be handled in segblend()
-
-static uint32_t segblend(uint8_t blendMode, uint32_t t, uint32_t b) {
-  typedef uint8_t(*FuncType)(uint8_t, uint8_t);
-  FuncType funcs[] = {
-    _dummy,      _dummy,     _dummy,    _subtract,
-    _difference, _average,   _dummy,    _divide,
-    _lighten,    _darken,    _screen,   _overlay,
-    _hardlight,  _softlight, _dodge,    _burn,
-    _dummy
-  };
-  if (blendMode >= BLENDMODES) blendMode = 0;
-  switch (blendMode) {
-    case 0 : return t;                   // top
-    case 1 : return b;                   // bottom
-    case 2 : return color_add(t,b,true); // add with preserve color ratio
-    case 6 : return RGBW32(_multiply(R(t),R(b)), _multiply(G(t),G(b)), _multiply(B(t),B(b)), _multiply(W(t),W(b)));
-    case 16: return t ? t : b;           // stencil
-  }
-  const FuncType func = funcs[blendMode];
-  return RGBW32(func(R(t),R(b)), func(G(t),G(b)), func(B(t),B(b)), func(W(t),W(b)));
-}
+// blend mode helpers and segblend() have moved to colors.h (shared with the bus layer)
 
 static bool isStatePixelClipped1D(int i, uint16_t clipStart, uint16_t clipStop, uint8_t style, uint16_t spatialProg) {
   if (style != TRANSITION_FADE && clipStart != clipStop) {
@@ -1688,12 +1648,12 @@ uint16_t WS2812FX::findLogicalPixel(uint16_t physIdx) const {
   }
 #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
   // Fallback when _invMappingTable was released after _physMap build: try reloading transient map or matching segment
-  if (_physMap && physIdx < _physMapLen) {
-    const uint32_t entry = _physMap[physIdx];
-    const uint8_t segIdx = (uint8_t)(entry >> 16);
-    if (segIdx == PHYS_SEG_BLACK) return 0xFFFFU;
-    if (segIdx == PHYS_SEG_COMPOSE) {
-      return (entry & PHYS_FLAG_2D) ? ((uint16_t)((entry >> 8) & 0xFFu) * Segment::maxWidth + (uint16_t)(entry & 0xFFu)) : (uint16_t)(entry & 0xFFFFu);
+  if (_physOwner && _physIdx && physIdx < _physMapLen) {
+    const uint8_t owner = _physOwner[physIdx];
+    if (owner == PHYS_SEG_BLACK) return 0xFFFFU;
+    if (owner > PHYS_SEG_BLACK) {
+      const uint16_t v = _physIdx[physIdx];
+      return (((owner - PHYS_SEG_COMPOSE) & 2u) != 0) ? (uint16_t)((uint16_t)(v >> 8) * Segment::maxWidth + (uint16_t)(v & 0xFFu)) : v;
     }
   }
 #endif
@@ -1713,13 +1673,13 @@ uint16_t WS2812FX::findPhysicalPixel(uint16_t logIdx) const {
     return 0xFFFFU;
   }
 #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
-  if (_physMap) {
+  if (_physOwner && _physIdx) {
     // Check if logIdx matches a PHYS_SEG_COMPOSE entry directly
     for (uint16_t p = 0; p < _physMapLen; p++) {
-      const uint32_t entry = _physMap[p];
-      const uint8_t segIdx = (uint8_t)(entry >> 16);
-      if (segIdx == PHYS_SEG_COMPOSE) {
-        const uint16_t l = (entry & PHYS_FLAG_2D) ? ((uint16_t)((entry >> 8) & 0xFFu) * Segment::maxWidth + (uint16_t)(entry & 0xFFu)) : (uint16_t)(entry & 0xFFFFu);
+      const uint8_t owner = _physOwner[p];
+      if (owner > PHYS_SEG_BLACK) {
+        const uint16_t v = _physIdx[p];
+        const uint16_t l = (((owner - PHYS_SEG_COMPOSE) & 2u) != 0) ? (uint16_t)((uint16_t)(v >> 8) * Segment::maxWidth + (uint16_t)(v & 0xFFu)) : v;
         if (l == logIdx) return p;
       }
     }
@@ -1776,9 +1736,8 @@ uint16_t WS2812FX::findPhysicalPixel(uint16_t logIdx) const {
       activeIdx++;
     }
     if (matchSeg >= 0) {
-      const uint32_t target = (uint32_t)matchPix | ((uint32_t)matchSeg << 16);
       for (uint16_t p = 0; p < _physMapLen; p++) {
-        if (_physMap[p] == target) return p;
+        if (_physOwner[p] == matchSeg && _physIdx[p] == matchPix) return p;
       }
     }
   }
@@ -1828,7 +1787,37 @@ inline bool WS2812FX::resolveSegmentVirtualCoord(const SegRenderState &s, uint16
   }
 }
 
-void WS2812FX::buildFrameStates(SegRenderState* states, const uint32_t** segPixels, uint8_t* segOpacity, uint8_t* segCCT, uint8_t &numActive, bool &uniformCCT, uint8_t &uniformCCTVal) const {
+uint8_t WS2812FX::countActiveSegments() const {
+  uint8_t n = 0;
+  for (const Segment &seg : _segments) {
+    if (!seg.isActive() || (!seg.on && !seg.isInTransition())) continue;
+    if (n >= MAX_NUM_SEGMENTS) break;
+    n++;
+  }
+  return n;
+}
+
+bool WS2812FX::ensureRenderBuffers(uint8_t numSegments) {
+  if (numSegments < 1) numSegments = 1;
+  if (_stateBuf && _planBuf && _renderBufCap >= numSegments) return true;
+  d_free(_stateBuf);
+  d_free(_planBuf);
+  _stateBuf = nullptr;
+  _planBuf = nullptr;
+  _renderBufCap = 0;
+  _stateBuf = static_cast<SegRenderState*>(d_malloc((size_t)numSegments * sizeof(SegRenderState)));
+  _planBuf = static_cast<SegPlan*>(d_malloc((size_t)numSegments * sizeof(SegPlan)));
+  if (_stateBuf && _planBuf) {
+    _renderBufCap = numSegments;
+    return true;
+  }
+  d_free(_stateBuf); _stateBuf = nullptr;
+  d_free(_planBuf);  _planBuf = nullptr;
+  DEBUG_PRINTF_P(PSTR("render scratch buffers: allocation of %u segments failed\n"), (unsigned)numSegments);
+  return false;
+}
+
+void WS2812FX::buildFrameStates(SegRenderState* states, uint8_t capacity, const uint32_t** segPixels, uint8_t* segOpacity, uint8_t* segCCT, uint8_t &numActive, bool &uniformCCT, uint8_t &uniformCCTVal) const {
   numActive = 0;
   uniformCCT = true;
   uniformCCTVal = 127;
@@ -1838,7 +1827,7 @@ void WS2812FX::buildFrameStates(SegRenderState* states, const uint32_t** segPixe
 
   for (const Segment &seg : _segments) {
     if (!seg.isActive() || (!seg.on && !seg.isInTransition())) continue;
-    if (numActive >= MAX_NUM_SEGMENTS) break;
+    if (numActive >= capacity) break;
 
     SegRenderState &s = states[numActive];
     s.pixels = seg.pixels;
@@ -1861,6 +1850,7 @@ void WS2812FX::buildFrameStates(SegRenderState* states, const uint32_t** segPixe
     s.mirror_y = seg.mirror_y;
     s.offset = s.length ? (seg.offset % s.length) : 0;
     s.blendMode = seg.blendMode < BLENDMODES ? seg.blendMode : 0;
+    s.map1D2D   = seg.map1D2D;
     s.cct = seg.currentCCT();
 
     uint8_t opacity = gamma8inv(seg.currentBri());
@@ -1977,6 +1967,57 @@ void WS2812FX::buildFrameStates(SegRenderState* states, const uint32_t** segPixe
   }
 }
 
+// Builds the affine render plan used by the bus layer's fast-path compose.
+// The plan describes, for every active segment, how a logical pixel index maps onto an
+// index inside the segment's own pixel buffer. For "simple" segments this mapping is
+// affine (idx = base + tx*x + ty*y), so all per-pixel coordinate arithmetic can be
+// hoisted out of the pixel loop.
+// Returns false if any active segment cannot be expressed as an affine map - in that
+// case the generic compose (WS2812FX::composeLogicalPixel) is used for composed pixels.
+bool WS2812FX::buildSegPlans(const SegRenderState* states, uint8_t numActive, SegPlan* plans, uint8_t &numPlans) const {
+  numPlans = 0;
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < numActive; i++) {
+    const SegRenderState &s = states[i];
+    if (s.segO) return false;                   // transition: two sources per segment
+    if (s.groupLen != 1) return false;         // grouping/spacing replicates pixels
+    if (s.mirror || s.mirror_y) return false;   // mirrored segments are only piecewise affine
+
+    SegPlan &p = plans[n];
+    p.pixels   = s.pixels;
+    p.opacity  = s.opacity;
+    p.blendMode = s.blendMode;
+    p.cct      = s.cct;
+
+    if (s.is2DSeg) {
+      if (s.transpose) return false;                       // transposed mapping swaps X & Y
+      if (s.map1D2D != M12_Pixels) return false;           // pBar/pArc/pCorner/pSpinwheel are not affine
+      if (s.nCols != s.width || s.nRows != s.height) return false; // grouping/spacing
+      const int32_t sx = s.reverse   ? -1 : 1;
+      const int32_t sy = s.reverse_y ? -1 : 1;
+      p.tx   = sx;
+      p.ty   = (int32_t)s.nCols * sy;
+      p.base = (s.reverse ? (int32_t)s.nCols - 1 : 0)
+             + (int32_t)s.nCols * (s.reverse_y ? (int32_t)s.nRows - 1 : 0)
+             - sx * (int32_t)s.start
+             - sy * (int32_t)s.startY * (int32_t)s.nCols;
+      p.x0 = s.start;  p.x1 = s.stop;
+      p.y0 = s.startY; p.y1 = s.stopY;
+    } else {
+      if (s.offset) return false;                // rotated segment: not affine
+      if (s.nCols != s.length) return false;     // grouping/spacing
+      p.tx   = s.reverse ? -1 : 1;
+      p.ty   = 0;
+      p.base = s.reverse ? ((int32_t)s.nCols - 1 + (int32_t)s.start) : -(int32_t)s.start;
+      p.x0 = s.start;  p.x1 = s.stop;
+      p.y0 = 0;        p.y1 = 1;
+    }
+    n++;
+  }
+  numPlans = n;
+  return true;
+}
+
 uint32_t WS2812FX::composeLogicalPixel(uint32_t logOrXY, bool is2DXY, const SegRenderState* states, uint8_t numActive, uint8_t &outCCT) const {
   if (numActive == 0) return BLACK;
 
@@ -2060,13 +2101,17 @@ uint32_t WS2812FX::composeSlowCallback(const void* fxPtr, uint32_t logOrXY, bool
 
 #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
 void WS2812FX::rebuildPhysMap() {
-  if (!_physMap || _physMapLen == 0) return;
+  if (!_physOwner || !_physIdx || _physMapLen == 0) return;
 
-  SegRenderState states[MAX_NUM_SEGMENTS];
+  if (!ensureRenderBuffers(countActiveSegments())) return;
+  SegRenderState* const states = _stateBuf;
+  SegPlan* const plans = _planBuf;
+  uint8_t numPlans = 0;
   uint8_t numActive = 0;
   bool dummyUniform = true;
   uint8_t dummyCCT = 127;
-  buildFrameStates(states, nullptr, nullptr, nullptr, numActive, dummyUniform, dummyCCT);
+  buildFrameStates(states, _renderBufCap, nullptr, nullptr, nullptr, numActive, dummyUniform, dummyCCT);
+  const bool allAffine = buildSegPlans(states, numActive, plans, numPlans);
 
   bool loadedTransientInv = false;
   if (!_invMappingTable && (_hasCustomFileMap || _hasPanelGaps)) {
@@ -2089,7 +2134,8 @@ void WS2812FX::rebuildPhysMap() {
       logIdx = panelPhysToLogical(phys);
     }
     if (logIdx == 0xFFFFU) {
-      _physMap[phys] = (uint32_t)PHYS_SEG_BLACK << 16;
+      _physOwner[phys] = PHYS_SEG_BLACK;
+      _physIdx[phys] = 0;
       continue;
     }
 
@@ -2117,19 +2163,26 @@ void WS2812FX::rebuildPhysMap() {
     }
 
     if (needsCompose) {
+      // pixels that need the generic compose are flagged, so the bus layer knows it
+      // cannot use the affine fast path for them
+      // variant bit0 = generic (slow) compose, bit1 = 2D coordinate
+      const uint8_t variant = (uint8_t)((allAffine ? 0u : 1u) | (is2DCoord ? 2u : 0u));
+      _physOwner[phys] = (uint8_t)(PHYS_SEG_COMPOSE + variant);
       if (is2DCoord) {
-        _physMap[phys] = (uint32_t)x | ((uint32_t)y << 8) | ((uint32_t)PHYS_SEG_COMPOSE << 16) | PHYS_FLAG_2D;
+        _physIdx[phys] = (uint16_t)((uint16_t)x | (uint16_t)(y << 8));
       } else {
-        _physMap[phys] = (uint32_t)logIdx | ((uint32_t)PHYS_SEG_COMPOSE << 16);
+        _physIdx[phys] = logIdx;
       }
     } else if (ownerSeg == PHYS_SEG_BLACK) {
-      _physMap[phys] = (uint32_t)PHYS_SEG_BLACK << 16;
+      _physOwner[phys] = PHYS_SEG_BLACK;
+      _physIdx[phys] = 0;
     } else {
-      _physMap[phys] = (uint32_t)ownerPix | ((uint32_t)ownerSeg << 16);
+      _physOwner[phys] = ownerSeg;
+      _physIdx[phys] = ownerPix;
     }
   }
 
-  // Free transient _invMappingTable in _physMap builds so max RAM stays <= 4B/px
+  // Free transient _invMappingTable in _physMap builds so max RAM stays <= 3B/px
   if (_invMappingTable) {
     d_free(_invMappingTable);
     _invMappingTable = nullptr;
@@ -2139,8 +2192,8 @@ void WS2812FX::rebuildPhysMap() {
 }
 
 void WS2812FX::ensurePhysMapValid() {
-  if (!_physMap || _physMapLen != _length) updatePixelBuffer();
-  if (!_physMap) return;
+  if (!_physOwner || !_physIdx || _physMapLen != _length) updatePixelBuffer();
+  if (!_physOwner || !_physIdx) return;
 
   uint32_t h = 2166136261u;
   auto mix = [&](uint32_t v) { h ^= v; h *= 16777619u; };
@@ -2159,7 +2212,8 @@ void WS2812FX::ensurePhysMapValid() {
     const uint32_t flags = (uint32_t)seg.reverse | ((uint32_t)seg.reverse_y << 1) | ((uint32_t)seg.transpose << 2) |
                            ((uint32_t)seg.mirror << 3) | ((uint32_t)seg.mirror_y << 4) |
                            ((uint32_t)(seg.blendMode == 0) << 5) | ((uint32_t)(seg.currentBri() == 255) << 6) |
-                           ((uint32_t)seg.isInTransition() << 7);
+                           ((uint32_t)seg.isInTransition() << 7) |
+                           ((uint32_t)(seg.map1D2D & 0x07) << 8); // affects the affine render plan
     mix(flags);
   }
   if (h == 0) h = 1;
@@ -2174,8 +2228,10 @@ void WS2812FX::prepareRealtimeMapping(bool enterRealtime) {
   if (enterRealtime) {
     if (customMappingTable || (!_hasCustomFileMap && !_hasPanelGaps)) return;
 #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
-    p_free(_physMap);
-    _physMap = nullptr;
+    p_free(_physOwner);
+    p_free(_physIdx);
+    _physOwner = nullptr;
+    _physIdx = nullptr;
     _physMapLen = 0;
     _physMapHash = 0;
 #endif
@@ -2215,8 +2271,11 @@ void WS2812FX::show() {
 
   while (!BusManager::canAllShow()) yield(); // wait for all buses to finish sending the previous frame
 
-  if (renderSegments) {
-    SegRenderState states[MAX_NUM_SEGMENTS];
+  // Keep the previous frame if render scratch allocation fails.
+  if (renderSegments && ensureRenderBuffers(countActiveSegments())) {
+    SegRenderState* const states = _stateBuf;
+    SegPlan* const plans = _planBuf;
+    uint8_t numPlans = 0;
     const uint32_t* segPixels[MAX_NUM_SEGMENTS];
     uint8_t segOpacity[MAX_NUM_SEGMENTS];
     uint8_t segCCT[MAX_NUM_SEGMENTS];
@@ -2224,7 +2283,10 @@ void WS2812FX::show() {
     bool uniformCCT = true;
     uint8_t uniformCCTVal = 127;
 
-    buildFrameStates(states, segPixels, segOpacity, segCCT, numActive, uniformCCT, uniformCCTVal);
+    buildFrameStates(states, _renderBufCap, segPixels, segOpacity, segCCT, numActive, uniformCCT, uniformCCTVal);
+    // hoisted, frame-invariant render plan: lets the bus layer compose pixels without
+    // re-deriving segment coordinates for every pixel
+    const bool allAffine = buildSegPlans(states, numActive, plans, numPlans);
 
     _frameStates    = states;
     _frameNumActive = numActive;
@@ -2238,14 +2300,18 @@ void WS2812FX::show() {
     ctx.correctWB   = correctWB;
     ctx.cctFromRgb  = cctFromRgb;
 #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
-    ctx.physMap     = _physMap;
-    ctx.physMapLen  = _physMap ? _physMapLen : 0;
+    ctx.physOwner   = _physOwner;
+    ctx.physIdx     = _physIdx;
+    ctx.physMapLen  = (_physOwner && _physIdx) ? _physMapLen : 0;
 #else
     ctx.invMap      = _invMappingTable;
     ctx.invMapLen   = _invMappingSize;
 #endif
     ctx.composeSlow = WS2812FX::composeSlowCallback;
     ctx.fxPtr       = this;
+    ctx.plans       = plans;
+    ctx.numPlans    = numPlans;
+    ctx.useAffine   = allAffine;
 
     const int oldCCT = Bus::getCCT();
     if (cctFromRgb) BusManager::setSegmentCCT(-1);
@@ -2284,7 +2350,7 @@ uint32_t WS2812FX::getPixelColor(unsigned n) const {
     uint8_t numActive = 0;
     bool dummyUniform = true;
     uint8_t dummyCCT = 127;
-    buildFrameStates(states, nullptr, nullptr, nullptr, numActive, dummyUniform, dummyCCT);
+    buildFrameStates(states, MAX_NUM_SEGMENTS, nullptr, nullptr, nullptr, numActive, dummyUniform, dummyCCT);
     uint8_t dummyOutCCT = 127;
     return composeLogicalPixel(n, false, states, numActive, dummyOutCCT);
   }
@@ -2301,7 +2367,7 @@ uint32_t WS2812FX::getPixelColorNoMap(unsigned n) const {
     uint8_t numActive = 0;
     bool dummyUniform = true;
     uint8_t dummyCCT = 127;
-    buildFrameStates(states, nullptr, nullptr, nullptr, numActive, dummyUniform, dummyCCT);
+    buildFrameStates(states, MAX_NUM_SEGMENTS, nullptr, nullptr, nullptr, numActive, dummyUniform, dummyCCT);
     uint8_t dummyOutCCT = 127;
     return composeLogicalPixel(logIdx, false, states, numActive, dummyOutCCT);
   }
@@ -2637,7 +2703,8 @@ void WS2812FX::printSize() {
   DEBUG_PRINTF_P(PSTR("Modes: %d*%d=%uB\n"), sizeof(mode_ptr), _mode.size(), (_mode.capacity()*sizeof(mode_ptr)));
   DEBUG_PRINTF_P(PSTR("Data: %d*%d=%uB\n"), sizeof(const char *), _modeData.size(), (_modeData.capacity()*sizeof(const char *)));
 #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
-  DEBUG_PRINTF_P(PSTR("PhysMap: %d*%d=%uB\n"), sizeof(uint32_t), (int)_physMapLen, _physMapLen*sizeof(uint32_t));
+  const uint32_t physMapBytesPerPixel = sizeof(*_physOwner) + sizeof(*_physIdx);
+  DEBUG_PRINTF_P(PSTR("PhysMap: %u*%d=%uB\n"), physMapBytesPerPixel, (int)_physMapLen, _physMapLen*physMapBytesPerPixel);
 #else
   DEBUG_PRINTF_P(PSTR("InvMap: %d*%d=%uB\n"), sizeof(uint16_t), (int)_invMappingSize, _invMappingSize*sizeof(uint16_t));
 #endif

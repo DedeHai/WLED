@@ -378,31 +378,42 @@ void BusDigital::updateFromBuffer(const PullPixelContext &ctx) {
   const uint8_t pixelFormat = enc.getPixelFormat();
   uint8_t* pixelData = _busPtr->getPixelData();
 
-  // Fast path: 8-bit 3-channel RGB without color-order map, inversion, white/CCT, ABL, or per-pixel CCT
+  // Fast path: 8-bit 3-channel RGB without color-order map, inversion, white/CCT, or per-pixel CCT
+  // note: ABL is supported here (the colour sum is accumulated inline, the limit itself is
+  // applied later in BusManager::show() -> applyBriLimit()), so enabling ABL does not
+  // force the bus onto the slow general path any more.
   if (pixelData && _busPtr->usesRawPixelBuffer() && pixelFormat == 3 && !_hasColorOrderMap &&
-      !enc.hasInvertedChannels() && !hasWhite() && !hasCCT() && !BusManager::_useABL &&
+      !enc.hasInvertedChannels() && !hasWhite() && !hasCCT() &&
       ctx.uniformCCT && Bus::_cct < 1900) {
+    const bool doABL = BusManager::_useABL;
+    const bool wackyWS2815 = (_milliAmpsPerLed >= 255);
     const uint8_t idxR = enc.idxR();
     const uint8_t idxG = enc.idxG();
     const uint8_t idxB = enc.idxB();
     const int step = _reversed ? -3 : 3;
     uint8_t* out = pixelData + (size_t)(_reversed ? (_skip + _len - 1) : _skip) * 3;
     const uint8_t briScale = (uint8_t)(busBri + 1);
+    uint32_t colorSum = _colorSum;
 
     for (uint16_t p = 0; p < _len; ++p, out += step) {
       uint8_t unusedCCT = 127;
       uint32_t c = ctx.pullPixel(_start + p, unusedCCT);
       if (c == 0 || busBri == 0) {
-        out[0] = 0; out[1] = 0; out[2] = 0;
+        out[idxR] = 0; out[idxG] = 0; out[idxB] = 0;
         continue;
       }
       if (busBri < 255) c = fast_color_scale(c, briScale);
       uint8_t r = R(c), g = G(c), b = B(c);
       if (gt) { r = gt[r]; g = gt[g]; b = gt[b]; }
+      if (doABL) {
+        if (!wackyWS2815) colorSum += (uint32_t)r + g + b;
+        else              colorSum += ((r > g) ? ((r > b) ? r : b) : ((g > b) ? g : b));
+      }
       out[idxR] = r;
       out[idxG] = g;
       out[idxB] = b;
     }
+    _colorSum = colorSum;
     return;
   }
 

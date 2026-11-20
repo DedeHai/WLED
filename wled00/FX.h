@@ -866,10 +866,14 @@ class WS2812FX {
       _currentSegment(nullptr),
       // true private variables
 #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
-      _physMap(nullptr),
+      _physOwner(nullptr),
+      _physIdx(nullptr),
       _physMapHash(0),
       _physMapLen(0),
 #endif
+      _stateBuf(nullptr),
+      _planBuf(nullptr),
+      _renderBufCap(0),
       _suspend(false),
       _brightness16(DEFAULT_BRIGHTNESS << 8),
       _length(DEFAULT_LED_COUNT),
@@ -902,8 +906,11 @@ class WS2812FX {
     }
 
     ~WS2812FX() {
+      d_free(_stateBuf);
+      d_free(_planBuf);
 #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
-      p_free(_physMap);
+      p_free(_physOwner);
+      p_free(_physIdx);
 #endif
       d_free(_invMappingTable);
       d_free(customMappingTable);
@@ -1077,6 +1084,7 @@ class WS2812FX {
       uint8_t  opacity, opacityOld;
       uint8_t  cct;
       uint8_t  blendMode;
+      uint8_t  map1D2D;
       uint8_t  style;
       uint8_t  grouping, groupLen;
       bool     is2DSeg;
@@ -1091,16 +1099,24 @@ class WS2812FX {
     uint16_t panelLogicalToPhys(uint16_t logIdx) const;
     bool loadInvMapFromFile(unsigned n);
     bool loadForwardMapFromFile(unsigned n);
-    void buildFrameStates(SegRenderState* states, const uint32_t** segPixels, uint8_t* segOpacity, uint8_t* segCCT, uint8_t &numActive, bool &uniformCCT, uint8_t &uniformCCTVal) const;
+    void buildFrameStates(SegRenderState* states, uint8_t capacity, const uint32_t** segPixels, uint8_t* segOpacity, uint8_t* segCCT, uint8_t &numActive, bool &uniformCCT, uint8_t &uniformCCTVal) const;
+    uint8_t countActiveSegments() const;
+    bool ensureRenderBuffers(uint8_t numSegments);
+    bool buildSegPlans(const SegRenderState* states, uint8_t numActive, SegPlan* plans, uint8_t &numPlans) const;
     uint32_t composeLogicalPixel(uint32_t logOrXY, bool is2DXY, const SegRenderState* states, uint8_t numActive, uint8_t &outCCT) const;
     static uint32_t composeSlowCallback(const void* fxPtr, uint32_t logOrXY, bool is2DXY, uint8_t &outCCT);
 #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
     void rebuildPhysMap();
     void ensurePhysMapValid();
-    uint32_t *_physMap;
+    uint8_t  *_physOwner;
+    uint16_t *_physIdx;
     uint32_t  _physMapHash;
     uint16_t  _physMapLen;
 #endif
+    // Heap-backed render scratch scales with active segments; readback keeps its own buffers.
+    SegRenderState* _stateBuf;
+    SegPlan* _planBuf;
+    uint8_t _renderBufCap;
     std::vector<Segment> _segments;
 
     volatile bool _suspend;
