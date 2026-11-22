@@ -626,22 +626,7 @@ class Segment {
     Segment(const Segment &orig); // copy constructor
     Segment(Segment &&orig) noexcept; // move constructor
 
-    ~Segment() {
-      #ifdef WLED_DEBUG
-      DEBUGFX_PRINTF_P(PSTR("-- Destroying segment: %p [%d,%d:%d,%d]"), this, (int)start, (int)stop, (int)startY, (int)stopY);
-      if (name) DEBUGFX_PRINTF_P(PSTR(" %s (%p)"), name, name);
-      if (data) DEBUGFX_PRINTF_P(PSTR(" %u->(%p)"), _dataLen, data);
-      DEBUGFX_PRINTF_P(PSTR(" T[%p]"), _t);
-      DEBUGFX_PRINTLN();
-      #endif
-      clearName();
-      stopTransition();   // deallocate "_t" (transition) and with it "_segOld" note: _segOld has _t=null, see copy constructor
-      #ifdef WLED_ENABLE_GIF
-      endImagePlayback(this);
-      #endif
-      deallocateData();
-      p_free(pixels);
-    }
+    ~Segment();
 
     Segment& operator= (const Segment &orig); // copy assignment
     Segment& operator= (Segment &&orig) noexcept; // move assignment
@@ -874,6 +859,8 @@ class WS2812FX {
       _stateBuf(nullptr),
       _planBuf(nullptr),
       _renderBufCap(0),
+      _cachedNumActive(0),
+      _stateCacheValid(false),
       _suspend(false),
       _brightness16(DEFAULT_BRIGHTNESS << 8),
       _length(DEFAULT_LED_COUNT),
@@ -953,8 +940,9 @@ class WS2812FX {
     inline void fill(uint32_t c) const                        { if (c == BLACK) { BusManager::blank(); return; } for (size_t i = 0; i < getLengthTotal(); i++) setPixelColor(i, c); }
     inline void trigger()                                     { _triggered = true; }  // Forces the next frame to be computed on all active segments.
     inline void setTransition(uint16_t t)                     { _transitionDur = t; } // sets transition time (in ms)
+    inline void invalidateStateCache() const                  { _stateCacheValid = false; }
     inline void appendSegment(uint16_t sStart=0, uint16_t sStop=30, uint16_t sStartY = 0, uint16_t sStopY = 1)
-                                                              { if (_segments.size() < getMaxSegments()) _segments.emplace_back(sStart,sStop,sStartY,sStopY); }
+                                                              { if (_segments.size() < getMaxSegments()) { invalidateStateCache(); _segments.emplace_back(sStart,sStop,sStartY,sStopY); } }
     inline void suspend()                                     { _suspend = true; }    // will suspend (and canacel) strip.service() execution
     inline void resume()                                      { _suspend = false; }   // will resume strip.service() execution
 
@@ -1072,36 +1060,55 @@ class WS2812FX {
       const uint32_t* pixels;
       const uint32_t* pixelsO;
       uint16_t start, stop;
-      uint16_t startY, stopY;
-      uint16_t width, height;
-      uint16_t length;
-      uint16_t nCols, nRows;
-      uint16_t oCols, oRows;
+      uint16_t nCols;
+      uint16_t oCols;
       uint16_t offset;
-      uint16_t pushOffsetX, pushOffsetY;
-      uint16_t clipStart, clipStop, clipStartY, clipStopY;
+      uint16_t pushOffsetX;
+      uint16_t clipStart, clipStop;
       uint16_t spatialProg, progInv;
+      uint8_t  startY, stopY;
+      uint8_t  nRows, oRows;
+      uint8_t  pushOffsetY;
+      uint8_t  clipStartY, clipStopY;
       uint8_t  opacity, opacityOld;
       uint8_t  cct;
       uint8_t  blendMode;
       uint8_t  map1D2D;
       uint8_t  style;
       uint8_t  grouping, groupLen;
-      bool     is2DSeg;
-      bool     reverse, reverse_y, transpose, mirror, mirror_y;
-      bool     invertClipping, fadeOldDiffMode;
-      bool     powerOffTrans, powerOnTrans;
-      bool     isSimple;
+      uint16_t is2DSeg         : 1;
+      uint16_t reverse         : 1;
+      uint16_t reverse_y       : 1;
+      uint16_t transpose       : 1;
+      uint16_t mirror          : 1;
+      uint16_t mirror_y        : 1;
+      uint16_t invertClipping  : 1;
+      uint16_t fadeOldDiffMode : 1;
+      uint16_t powerOffTrans   : 1;
+      uint16_t powerOnTrans    : 1;
+      uint16_t isSimple        : 1;
+      inline uint16_t width()  const { return stop - start; }
+      inline uint8_t  height() const { return stopY - startY; }
+      inline uint16_t length() const { return (uint16_t)(stop - start) * (stopY - startY); }
     };
 
+    static bool resolveRawVirtualCoord(bool is2DSeg, uint16_t start, uint16_t stop, uint8_t startY, uint8_t stopY,
+                                       uint16_t width, uint8_t height, uint16_t length, uint16_t offset,
+                                       uint16_t nCols, uint8_t nRows, uint8_t grouping, uint8_t groupLen,
+                                       bool isSimple, bool transpose, bool mirror, bool mirror_y, bool reverse, bool reverse_y,
+                                       uint16_t logIdx, uint16_t x, uint16_t y, bool is2DCoord, uint16_t &outC, uint16_t &outR);
     static inline bool resolveSegmentVirtualCoord(const SegRenderState &s, uint16_t logIdx, uint16_t x, uint16_t y, bool is2DCoord, uint16_t &outC, uint16_t &outR);
     uint16_t panelPhysToLogical(uint16_t phys) const;
     uint16_t panelLogicalToPhys(uint16_t logIdx) const;
     bool loadInvMapFromFile(unsigned n);
     bool loadForwardMapFromFile(unsigned n);
+#ifndef WLED_DISABLE_2D
+    void buildPanelGapMap(uint16_t* table, size_t tableLen, bool forward, bool* outHasGaps = nullptr) const;
+#endif
     void buildFrameStates(SegRenderState* states, uint8_t capacity, const uint32_t** segPixels, uint8_t* segOpacity, uint8_t* segCCT, uint8_t &numActive, bool &uniformCCT, uint8_t &uniformCCTVal) const;
     uint8_t countActiveSegments() const;
-    bool ensureRenderBuffers(uint8_t numSegments);
+    bool ensureRenderBuffers(uint8_t numSegments) const;
+    bool ensureCachedStates() const;
     bool buildSegPlans(const SegRenderState* states, uint8_t numActive, SegPlan* plans, uint8_t &numPlans) const;
     uint32_t composeLogicalPixel(uint32_t logOrXY, bool is2DXY, const SegRenderState* states, uint8_t numActive, uint8_t &outCCT) const;
     static uint32_t composeSlowCallback(const void* fxPtr, uint32_t logOrXY, bool is2DXY, uint8_t &outCCT);
@@ -1113,10 +1120,12 @@ class WS2812FX {
     uint32_t  _physMapHash;
     uint16_t  _physMapLen;
 #endif
-    // Heap-backed render scratch scales with active segments; readback keeps its own buffers.
-    SegRenderState* _stateBuf;
-    SegPlan* _planBuf;
-    uint8_t _renderBufCap;
+    // Heap-backed render scratch scales with active segments and is reused by pixel readback.
+    mutable SegRenderState* _stateBuf;
+    mutable SegPlan* _planBuf;
+    mutable uint8_t _renderBufCap;
+    mutable uint8_t _cachedNumActive;
+    mutable bool _stateCacheValid;
     std::vector<Segment> _segments;
 
     volatile bool _suspend;

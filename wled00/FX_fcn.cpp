@@ -58,6 +58,24 @@ uint16_t Segment::_clipStop = 0;
 uint8_t  Segment::_clipStartY = 0;
 uint8_t  Segment::_clipStopY = 1;
 
+Segment::~Segment() {
+  #ifdef WLED_DEBUG
+  DEBUGFX_PRINTF_P(PSTR("-- Destroying segment: %p [%d,%d:%d,%d]"), this, (int)start, (int)stop, (int)startY, (int)stopY);
+  if (name) DEBUGFX_PRINTF_P(PSTR(" %s (%p)"), name, name);
+  if (data) DEBUGFX_PRINTF_P(PSTR(" %u->(%p)"), _dataLen, data);
+  DEBUGFX_PRINTF_P(PSTR(" T[%p]"), _t);
+  DEBUGFX_PRINTLN();
+  #endif
+  strip.invalidateStateCache();
+  clearName();
+  stopTransition();   // deallocate "_t" (transition) and with it "_segOld" note: _segOld has _t=null, see copy constructor
+  #ifdef WLED_ENABLE_GIF
+  endImagePlayback(this);
+  #endif
+  deallocateData();
+  p_free(pixels);
+}
+
 // copy constructor
 Segment::Segment(const Segment &orig) {
   //DEBUG_PRINTF_P(PSTR("-- Copy segment constructor: %p -> %p\n"), &orig, this);
@@ -99,6 +117,7 @@ Segment& Segment::operator= (const Segment &orig) {
   //DEBUG_PRINTF_P(PSTR("-- Copying segment: %p -> %p\n"), &orig, this);
   if (this != &orig) {
     // clean destination
+    strip.invalidateStateCache();
     if (name) { p_free(name); name = nullptr; }
     stopTransition(); // delete _t
     deallocateData();
@@ -132,6 +151,7 @@ Segment& Segment::operator= (const Segment &orig) {
 Segment& Segment::operator= (Segment &&orig) noexcept {
   //DEBUG_PRINTF_P(PSTR("-- Moving segment: %p -> %p\n"), &orig, this);
   if (this != &orig) {
+    strip.invalidateStateCache();
     if (name) { p_free(name); name = nullptr; } // free old name
     stopTransition(); // delete _t
     deallocateData(); // free old runtime data
@@ -295,6 +315,7 @@ void Segment::handleTransition() {
     // end transitions if completed but wait for a global power-off transition to complete to avoid revealing pixels (see blendSegment() blanking)
     const bool spatialDone = spatialProgress() == (_t->_flags & TRANSITION_FLAG_REVERSED ? 0 : 0xFFFFU);    
     if (_t->_oldSegment && spatialDone) {
+      strip.invalidateStateCache();
       delete _t->_oldSegment; _t->_oldSegment = nullptr;
     }
     if (spatialDone && fadeProgress() == 0xFFFFU) {
@@ -419,7 +440,7 @@ void Segment::startTransition(uint16_t dur, uint8_t kind) {
       _t->_flags ^= TRANSITION_FLAG_POWER_ON; // flip POWER_ON flag
     } else {
       // global or segment on/off initiated: stop ongoing segment transition immediately, we do need the spatial channel and want to start a new transition
-      if (_t->_oldSegment) { delete _t->_oldSegment; _t->_oldSegment = nullptr; }
+      if (_t->_oldSegment) { strip.invalidateStateCache(); delete _t->_oldSegment; _t->_oldSegment = nullptr; }
       captureBlend(millis()); // rebase transition values to current visual blend before starting the new power transition
       if (segmentCopy) {
         if (createOldSegment(0xFFFFU)) { // spatial transition, need a fresh copy (colors as-is, old side captures the current transition brightness)
@@ -464,6 +485,7 @@ void Segment::startTransition(uint16_t dur, uint8_t kind) {
 void Segment::stopTransition() {
   if (_t == nullptr) return; // no ongoing transition
   DEBUG_PRINTF_P(PSTR("-- Stopping transition: S=%p T(%p) O[%p]\n"), this, _t, _t->_oldSegment);
+  strip.invalidateStateCache();
   delete _t;
   _t = nullptr;
 }
@@ -622,6 +644,7 @@ void Segment::setGeometry(uint16_t i1, uint16_t i2, uint8_t grp, uint8_t spc, ui
   
   unsigned oldLength = length();
 
+  strip.invalidateStateCache();
   markForReset();
   stopTransition(); // we can't use transition if segment dimensions changed
   stateChanged = true;      // send UDP/WS broadcast
@@ -1342,6 +1365,7 @@ uint32_t Segment::color_from_palette(uint16_t i, bool mapping, bool moving, uint
 
 //do not call this method from system context (network callback)
 void WS2812FX::finalizeInit() {
+  _stateCacheValid = false;
   //reset segment runtimes
   restartRuntime();
 
@@ -1653,7 +1677,7 @@ uint16_t WS2812FX::findLogicalPixel(uint16_t physIdx) const {
     if (owner == PHYS_SEG_BLACK) return 0xFFFFU;
     if (owner > PHYS_SEG_BLACK) {
       const uint16_t v = _physIdx[physIdx];
-      return (((owner - PHYS_SEG_COMPOSE) & 2u) != 0) ? (uint16_t)((uint16_t)(v >> 8) * Segment::maxWidth + (uint16_t)(v & 0xFFu)) : v;
+      return (owner > PHYS_SEG_COMPOSE) ? (uint16_t)((uint16_t)(v >> 8) * Segment::maxWidth + (uint16_t)(v & 0xFFu)) : v;
     }
   }
 #endif
@@ -1679,7 +1703,7 @@ uint16_t WS2812FX::findPhysicalPixel(uint16_t logIdx) const {
       const uint8_t owner = _physOwner[p];
       if (owner > PHYS_SEG_BLACK) {
         const uint16_t v = _physIdx[p];
-        const uint16_t l = (((owner - PHYS_SEG_COMPOSE) & 2u) != 0) ? (uint16_t)((uint16_t)(v >> 8) * Segment::maxWidth + (uint16_t)(v & 0xFFu)) : v;
+        const uint16_t l = (owner > PHYS_SEG_COMPOSE) ? (uint16_t)((uint16_t)(v >> 8) * Segment::maxWidth + (uint16_t)(v & 0xFFu)) : v;
         if (l == logIdx) return p;
       }
     }
@@ -1693,45 +1717,20 @@ uint16_t WS2812FX::findPhysicalPixel(uint16_t logIdx) const {
     uint16_t matchPix = 0;
     for (const Segment &seg : _segments) {
       if (!seg.isActive() || (!seg.on && !seg.isInTransition())) continue;
-      const uint16_t w = seg.width(), h = seg.height(), len = seg.length();
+      const uint16_t len = seg.length();
       const bool seg2D = isMatrix && ((size_t)seg.start + (size_t)seg.startY * Segment::maxWidth + len <= matrixSize);
-      if (seg2D) {
-        if (is2DCoord && x >= seg.start && x < seg.stop && y >= seg.startY && y < seg.stopY) {
-          uint16_t mx = x - seg.start, my = y - seg.startY;
-          const uint16_t nCols = seg.virtualWidth(), nRows = seg.virtualHeight();
-          const uint8_t gl = seg.groupLength();
-          const bool fx = seg.transpose ? seg.mirror_y : seg.mirror;
-          const bool fy = seg.transpose ? seg.mirror : seg.mirror_y;
-          if (fx && mx >= ((w + 1) >> 1)) mx = w - mx - 1;
-          if (fy && my >= ((h + 1) >> 1)) my = h - my - 1;
-          if (gl == 1 || ((mx % gl) < seg.grouping && (my % gl) < seg.grouping)) {
-            if (gl > 1) { mx /= gl; my /= gl; }
-            if (seg.transpose) std::swap(mx, my);
-            if (mx < nCols && my < nRows) {
-              if (seg.reverse) mx = nCols - mx - 1;
-              if (seg.reverse_y) my = nRows - my - 1;
-              matchSeg = activeIdx;
-              matchPix = mx + my * nCols;
-            }
-          }
-        }
-      } else {
-        if (logIdx >= seg.start && logIdx < seg.stop) {
-          uint16_t rel = logIdx - seg.start;
-          const uint16_t off = len ? (seg.offset % len) : 0;
-          if (off) rel = (rel >= off) ? (rel - off) : (rel + len - off);
-          const uint16_t nLen = seg.virtualLength();
-          const uint8_t gl = seg.groupLength();
-          if (seg.mirror && rel >= ((len + 1) >> 1)) rel = len - rel - 1;
-          if (gl == 1 || (rel % gl) < seg.grouping) {
-            if (gl > 1) rel /= gl;
-            if (rel < nLen) {
-              if (seg.reverse) rel = nLen - rel - 1;
-              matchSeg = activeIdx;
-              matchPix = rel;
-            }
-          }
-        }
+      const uint16_t nCols = seg2D ? seg.virtualWidth() : seg.virtualLength();
+      const uint8_t  nRows = seg2D ? seg.virtualHeight() : 1;
+      const uint8_t  gl = seg.groupLength();
+      const uint16_t off = len ? (seg.offset % len) : 0;
+      uint16_t c = 0, r = 0;
+      if (resolveRawVirtualCoord(seg2D, seg.start, seg.stop, (uint8_t)seg.startY, (uint8_t)seg.stopY,
+                                 seg.width(), (uint8_t)seg.height(), len, off, nCols, nRows,
+                                 seg.grouping, gl, (gl == 1) && !seg.mirror && !seg.mirror_y,
+                                 seg.transpose, seg.mirror, seg.mirror_y, seg.reverse, seg.reverse_y,
+                                 logIdx, x, y, is2DCoord, c, r)) {
+        matchSeg = activeIdx;
+        matchPix = c + r * nCols;
       }
       activeIdx++;
     }
@@ -1745,46 +1744,54 @@ uint16_t WS2812FX::findPhysicalPixel(uint16_t logIdx) const {
   return 0xFFFFU;
 }
 
-inline bool WS2812FX::resolveSegmentVirtualCoord(const SegRenderState &s, uint16_t logIdx, uint16_t x, uint16_t y, bool is2DCoord, uint16_t &outC, uint16_t &outR) {
-  if (s.is2DSeg) {
-    if (!is2DCoord || x < s.start || x >= s.stop || y < s.startY || y >= s.stopY) return false;
-    uint16_t mx = x - s.start;
-    uint16_t my = y - s.startY;
-    if (!s.isSimple) {
-      const bool flipX = s.transpose ? s.mirror_y : s.mirror;
-      const bool flipY = s.transpose ? s.mirror   : s.mirror_y;
-      if (flipX && mx >= ((s.width  + 1) >> 1)) mx = s.width  - mx - 1;
-      if (flipY && my >= ((s.height + 1) >> 1)) my = s.height - my - 1;
-      if (s.groupLen > 1) {
-        if ((mx % s.groupLen) >= s.grouping || (my % s.groupLen) >= s.grouping) return false;
-        mx /= s.groupLen;
-        my /= s.groupLen;
+bool WS2812FX::resolveRawVirtualCoord(bool is2DSeg, uint16_t start, uint16_t stop, uint8_t startY, uint8_t stopY,
+                                      uint16_t width, uint8_t height, uint16_t length, uint16_t offset,
+                                      uint16_t nCols, uint8_t nRows, uint8_t grouping, uint8_t groupLen,
+                                      bool isSimple, bool transpose, bool mirror, bool mirror_y, bool reverse, bool reverse_y,
+                                      uint16_t logIdx, uint16_t x, uint16_t y, bool is2DCoord, uint16_t &outC, uint16_t &outR) {
+  if (is2DSeg) {
+    if (!is2DCoord || x < start || x >= stop || y < startY || y >= stopY) return false;
+    uint16_t mx = x - start;
+    uint16_t my = y - startY;
+    if (!isSimple) {
+      const bool flipX = transpose ? mirror_y : mirror;
+      const bool flipY = transpose ? mirror   : mirror_y;
+      if (flipX && mx >= ((width  + 1) >> 1)) mx = width  - mx - 1;
+      if (flipY && my >= ((height + 1) >> 1)) my = height - my - 1;
+      if (groupLen > 1) {
+        if ((mx % groupLen) >= grouping || (my % groupLen) >= grouping) return false;
+        mx /= groupLen;
+        my /= groupLen;
       }
     }
-    if (s.transpose) std::swap(mx, my);
-    if (mx >= s.nCols || my >= s.nRows) return false;
-    if (s.reverse)   mx = s.nCols - mx - 1;
-    if (s.reverse_y) my = s.nRows - my - 1;
+    if (transpose) std::swap(mx, my);
+    if (mx >= nCols || my >= nRows) return false;
+    if (reverse)   mx = nCols - mx - 1;
+    if (reverse_y) my = nRows - my - 1;
     outC = mx;
     outR = my;
     return true;
   } else {
-    if (logIdx < s.start || logIdx >= s.stop) return false;
-    uint16_t rel = logIdx - s.start;
-    if (s.offset) rel = (rel >= s.offset) ? (rel - s.offset) : (rel + s.length - s.offset);
-    if (!s.isSimple) {
-      if (s.mirror && rel >= ((s.length + 1) >> 1)) rel = s.length - rel - 1;
-      if (s.groupLen > 1) {
-        if ((rel % s.groupLen) >= s.grouping) return false;
-        rel /= s.groupLen;
+    if (logIdx < start || logIdx >= stop) return false;
+    uint16_t rel = logIdx - start;
+    if (offset) rel = (rel >= offset) ? (rel - offset) : (rel + length - offset);
+    if (!isSimple) {
+      if (mirror && rel >= ((length + 1) >> 1)) rel = length - rel - 1;
+      if (groupLen > 1) {
+        if ((rel % groupLen) >= grouping) return false;
+        rel /= groupLen;
       }
     }
-    if (rel >= s.nCols) return false;
-    if (s.reverse) rel = s.nCols - rel - 1;
+    if (rel >= nCols) return false;
+    if (reverse) rel = nCols - rel - 1;
     outC = rel;
     outR = 0;
     return true;
   }
+}
+
+inline bool WS2812FX::resolveSegmentVirtualCoord(const SegRenderState &s, uint16_t logIdx, uint16_t x, uint16_t y, bool is2DCoord, uint16_t &outC, uint16_t &outR) {
+  return resolveRawVirtualCoord(s.is2DSeg, s.start, s.stop, s.startY, s.stopY, s.width(), s.height(), s.length(), s.offset, s.nCols, s.nRows, s.grouping, s.groupLen, s.isSimple, s.transpose, s.mirror, s.mirror_y, s.reverse, s.reverse_y, logIdx, x, y, is2DCoord, outC, outR);
 }
 
 uint8_t WS2812FX::countActiveSegments() const {
@@ -1797,9 +1804,11 @@ uint8_t WS2812FX::countActiveSegments() const {
   return n;
 }
 
-bool WS2812FX::ensureRenderBuffers(uint8_t numSegments) {
+bool WS2812FX::ensureRenderBuffers(uint8_t numSegments) const {
   if (numSegments < 1) numSegments = 1;
   if (_stateBuf && _planBuf && _renderBufCap >= numSegments) return true;
+  _stateCacheValid = false;
+  _cachedNumActive = 0;
   d_free(_stateBuf);
   d_free(_planBuf);
   _stateBuf = nullptr;
@@ -1815,6 +1824,16 @@ bool WS2812FX::ensureRenderBuffers(uint8_t numSegments) {
   d_free(_planBuf);  _planBuf = nullptr;
   DEBUG_PRINTF_P(PSTR("render scratch buffers: allocation of %u segments failed\n"), (unsigned)numSegments);
   return false;
+}
+
+bool WS2812FX::ensureCachedStates() const {
+  if (_stateCacheValid && _stateBuf) return true;
+  if (!ensureRenderBuffers(countActiveSegments())) return false;
+  bool dummyUniform = true;
+  uint8_t dummyCCT = 127;
+  buildFrameStates(_stateBuf, _renderBufCap, nullptr, nullptr, nullptr, _cachedNumActive, dummyUniform, dummyCCT);
+  _stateCacheValid = true;
+  return true;
 }
 
 void WS2812FX::buildFrameStates(SegRenderState* states, uint8_t capacity, const uint32_t** segPixels, uint8_t* segOpacity, uint8_t* segCCT, uint8_t &numActive, bool &uniformCCT, uint8_t &uniformCCTVal) const {
@@ -1835,12 +1854,12 @@ void WS2812FX::buildFrameStates(SegRenderState* states, uint8_t capacity, const 
     s.pixelsO = s.segO ? s.segO->pixels : nullptr;
     s.start = seg.start;
     s.stop = seg.stop;
-    s.startY = seg.startY;
-    s.stopY = seg.stopY;
-    s.width = seg.width();
-    s.height = seg.height();
-    s.length = seg.length();
-    s.is2DSeg = isMatrix && ((size_t)s.start + (size_t)s.startY * Segment::maxWidth + s.length <= matrixSize);
+    s.startY = (uint8_t)seg.startY;
+    s.stopY = (uint8_t)seg.stopY;
+    const uint16_t w = s.width();
+    const uint8_t  h = s.height();
+    const uint16_t len = s.length();
+    s.is2DSeg = isMatrix && ((size_t)s.start + (size_t)s.startY * Segment::maxWidth + len <= matrixSize);
     s.grouping = seg.grouping;
     s.groupLen = seg.groupLength();
     s.reverse = seg.reverse;
@@ -1848,7 +1867,7 @@ void WS2812FX::buildFrameStates(SegRenderState* states, uint8_t capacity, const 
     s.transpose = seg.transpose;
     s.mirror = seg.mirror;
     s.mirror_y = seg.mirror_y;
-    s.offset = s.length ? (seg.offset % s.length) : 0;
+    s.offset = len ? (seg.offset % len) : 0;
     s.blendMode = seg.blendMode < BLENDMODES ? seg.blendMode : 0;
     s.map1D2D   = seg.map1D2D;
     s.cct = seg.currentCCT();
@@ -1858,7 +1877,7 @@ void WS2812FX::buildFrameStates(SegRenderState* states, uint8_t capacity, const 
     uint8_t style = blendingStyle;
     if (s.segO && style != TRANSITION_FADE) opacityOld = gamma8inv(s.segO->currentBri());
     else opacityOld = opacity;
-    if ((s.width * s.height) == 1 || !s.segO) style = TRANSITION_FADE;
+    if ((w * h) == 1 || !s.segO) style = TRANSITION_FADE;
     s.opacity = opacity;
     s.opacityOld = opacityOld;
     s.style = style;
@@ -1887,47 +1906,47 @@ void WS2812FX::buildFrameStates(SegRenderState* states, uint8_t capacity, const 
     s.clipStart = s.clipStop = s.clipStartY = s.clipStopY = 0;
     s.pushOffsetX = s.pushOffsetY = 0;
     if (s.segO && style != TRANSITION_FADE) {
-      const unsigned dw = (progress * s.width) / 0xFFFFU + 1;
-      const unsigned dh = (progress * s.height) / 0xFFFFU + 1;
+      const unsigned dw = (progress * w) / 0xFFFFU + 1;
+      const unsigned dh = (progress * h) / 0xFFFFU + 1;
       switch (style) {
         case TRANSITION_CIRCULAR_IN:
         case TRANSITION_CIRCULAR_OUT:
         case TRANSITION_FAIRY_DUST:
-          s.clipStop = s.width; s.clipStopY = s.height; break;
+          s.clipStop = w; s.clipStopY = h; break;
         case TRANSITION_SWIPE_RIGHT:
         case TRANSITION_PUSH_RIGHT:
-          s.clipStop = dw; s.clipStopY = s.height; break;
+          s.clipStop = dw; s.clipStopY = h; break;
         case TRANSITION_SWIPE_LEFT:
         case TRANSITION_PUSH_LEFT:
-          s.clipStart = s.width - dw; s.clipStop = s.width; s.clipStopY = s.height; break;
+          s.clipStart = w - dw; s.clipStop = w; s.clipStopY = h; break;
         case TRANSITION_OUTSIDE_IN:
-          s.clipStart = (s.width + dw) / 2; s.clipStop = (s.width - dw) / 2;
-          s.clipStartY = (s.height + dh) / 2; s.clipStopY = (s.height - dh) / 2; break;
+          s.clipStart = (w + dw) / 2; s.clipStop = (w - dw) / 2;
+          s.clipStartY = (h + dh) / 2; s.clipStopY = (h - dh) / 2; break;
         case TRANSITION_INSIDE_OUT:
-          s.clipStart = (s.width - dw) / 2; s.clipStop = (s.width + dw) / 2;
-          s.clipStartY = (s.height - dh) / 2; s.clipStopY = (s.height + dh) / 2; break;
+          s.clipStart = (w - dw) / 2; s.clipStop = (w + dw) / 2;
+          s.clipStartY = (h - dh) / 2; s.clipStopY = (h + dh) / 2; break;
         case TRANSITION_SWIPE_DOWN:
         case TRANSITION_PUSH_DOWN:
-          s.clipStop = s.width; s.clipStopY = dh; break;
+          s.clipStop = w; s.clipStopY = dh; break;
         case TRANSITION_SWIPE_UP:
         case TRANSITION_PUSH_UP:
-          s.clipStop = s.width; s.clipStartY = s.height - dh; s.clipStopY = s.height; break;
+          s.clipStop = w; s.clipStartY = h - dh; s.clipStopY = h; break;
         case TRANSITION_OPEN_H:
-          s.clipStart = (s.width - dw) / 2; s.clipStop = (s.width + dw) / 2; s.clipStopY = s.height; break;
+          s.clipStart = (w - dw) / 2; s.clipStop = (w + dw) / 2; s.clipStopY = h; break;
         case TRANSITION_OPEN_V:
-          s.clipStop = s.width; s.clipStartY = (s.height - dh) / 2; s.clipStopY = (s.height + dh) / 2; break;
+          s.clipStop = w; s.clipStartY = (h - dh) / 2; s.clipStopY = (h + dh) / 2; break;
         case TRANSITION_SWIPE_TL:
         case TRANSITION_PUSH_TL:
           s.clipStop = dw; s.clipStopY = dh; break;
         case TRANSITION_SWIPE_TR:
         case TRANSITION_PUSH_TR:
-          s.clipStart = s.width - dw; s.clipStop = s.width; s.clipStopY = dh; break;
+          s.clipStart = w - dw; s.clipStop = w; s.clipStopY = dh; break;
         case TRANSITION_SWIPE_BR:
         case TRANSITION_PUSH_BR:
-          s.clipStart = s.width - dw; s.clipStop = s.width; s.clipStartY = s.height - dh; s.clipStopY = s.height; break;
+          s.clipStart = w - dw; s.clipStop = w; s.clipStartY = h - dh; s.clipStopY = h; break;
         case TRANSITION_SWIPE_BL:
         case TRANSITION_PUSH_BL:
-          s.clipStop = dw; s.clipStartY = s.height - dh; s.clipStopY = s.height; break;
+          s.clipStop = dw; s.clipStartY = h - dh; s.clipStopY = h; break;
       }
       if (s.is2DSeg) {
         const unsigned offX = (style == TRANSITION_PUSH_UP || style == TRANSITION_PUSH_DOWN) ? 0 : (unsigned)s.progInv * s.nCols / 0xFFFFU;
@@ -1993,7 +2012,7 @@ bool WS2812FX::buildSegPlans(const SegRenderState* states, uint8_t numActive, Se
     if (s.is2DSeg) {
       if (s.transpose) return false;                       // transposed mapping swaps X & Y
       if (s.map1D2D != M12_Pixels) return false;           // pBar/pArc/pCorner/pSpinwheel are not affine
-      if (s.nCols != s.width || s.nRows != s.height) return false; // grouping/spacing
+      if (s.nCols != s.width() || s.nRows != s.height()) return false; // grouping/spacing
       const int32_t sx = s.reverse   ? -1 : 1;
       const int32_t sy = s.reverse_y ? -1 : 1;
       p.tx   = sx;
@@ -2006,7 +2025,7 @@ bool WS2812FX::buildSegPlans(const SegRenderState* states, uint8_t numActive, Se
       p.y0 = s.startY; p.y1 = s.stopY;
     } else {
       if (s.offset) return false;                // rotated segment: not affine
-      if (s.nCols != s.length) return false;     // grouping/spacing
+      if (s.nCols != s.length()) return false;   // grouping/spacing
       p.tx   = s.reverse ? -1 : 1;
       p.ty   = 0;
       p.base = s.reverse ? ((int32_t)s.nCols - 1 + (int32_t)s.start) : -(int32_t)s.start;
@@ -2101,13 +2120,12 @@ void WS2812FX::rebuildPhysMap() {
 
   if (!ensureRenderBuffers(countActiveSegments())) return;
   SegRenderState* const states = _stateBuf;
-  SegPlan* const plans = _planBuf;
-  uint8_t numPlans = 0;
   uint8_t numActive = 0;
   bool dummyUniform = true;
   uint8_t dummyCCT = 127;
   buildFrameStates(states, _renderBufCap, nullptr, nullptr, nullptr, numActive, dummyUniform, dummyCCT);
-  const bool allAffine = buildSegPlans(states, numActive, plans, numPlans);
+  _cachedNumActive = numActive;
+  _stateCacheValid = true;
 
   bool loadedTransientInv = false;
   if (!_invMappingTable && (_hasCustomFileMap || _hasPanelGaps)) {
@@ -2159,11 +2177,8 @@ void WS2812FX::rebuildPhysMap() {
     }
 
     if (needsCompose) {
-      // pixels that need the generic compose are flagged, so the bus layer knows it
-      // cannot use the affine fast path for them
-      // variant bit0 = generic (slow) compose, bit1 = 2D coordinate
-      const uint8_t variant = (uint8_t)((allAffine ? 0u : 1u) | (is2DCoord ? 2u : 0u));
-      _physOwner[phys] = (uint8_t)(PHYS_SEG_COMPOSE + variant);
+      // PHYS_SEG_COMPOSE + 0 = 1D, PHYS_SEG_COMPOSE + 1 = 2D
+      _physOwner[phys] = (uint8_t)(PHYS_SEG_COMPOSE + (is2DCoord ? 1u : 0u));
       if (is2DCoord) {
         _physIdx[phys] = (uint16_t)((uint16_t)x | (uint16_t)(y << 8));
       } else {
@@ -2284,6 +2299,8 @@ void WS2812FX::show() {
 #else
     buildFrameStates(states, _renderBufCap, nullptr, nullptr, nullptr, numActive, uniformCCT, uniformCCTVal);
 #endif
+    _cachedNumActive = numActive;
+    _stateCacheValid = true;
     // hoisted, frame-invariant render plan: lets the bus layer compose pixels without
     // re-deriving segment coordinates for every pixel
     const bool allAffine = buildSegPlans(states, numActive, plans, numPlans);
@@ -2349,13 +2366,9 @@ uint32_t WS2812FX::getPixelColor(unsigned n) const {
   const uint16_t total = getLengthTotal();
   if (n >= total) return 0;
   if (realtimeMode == REALTIME_MODE_INACTIVE || useMainSegmentOnly || realtimeOverride > REALTIME_OVERRIDE_NONE) {
-    SegRenderState states[MAX_NUM_SEGMENTS];
-    uint8_t numActive = 0;
-    bool dummyUniform = true;
-    uint8_t dummyCCT = 127;
-    buildFrameStates(states, MAX_NUM_SEGMENTS, nullptr, nullptr, nullptr, numActive, dummyUniform, dummyCCT);
+    if (!ensureCachedStates()) return 0;
     uint8_t dummyOutCCT = 127;
-    return composeLogicalPixel(n, false, states, numActive, dummyOutCCT);
+    return composeLogicalPixel(n, false, _stateBuf, _cachedNumActive, dummyOutCCT);
   }
   const uint16_t phys = realtimeRespectLedMaps ? findPhysicalPixel(n) : (uint16_t)n;
   return (phys < _length) ? BusManager::getPixelColor(phys) : 0;
@@ -2366,13 +2379,9 @@ uint32_t WS2812FX::getPixelColorNoMap(unsigned n) const {
   if (realtimeMode == REALTIME_MODE_INACTIVE || useMainSegmentOnly || realtimeOverride > REALTIME_OVERRIDE_NONE) {
     const uint16_t logIdx = findLogicalPixel(n);
     if (logIdx >= getLengthTotal()) return 0;
-    SegRenderState states[MAX_NUM_SEGMENTS];
-    uint8_t numActive = 0;
-    bool dummyUniform = true;
-    uint8_t dummyCCT = 127;
-    buildFrameStates(states, MAX_NUM_SEGMENTS, nullptr, nullptr, nullptr, numActive, dummyUniform, dummyCCT);
+    if (!ensureCachedStates()) return 0;
     uint8_t dummyOutCCT = 127;
-    return composeLogicalPixel(logIdx, false, states, numActive, dummyOutCCT);
+    return composeLogicalPixel(logIdx, false, _stateBuf, _cachedNumActive, dummyOutCCT);
   }
   return BusManager::getPixelColor(n);
 }
@@ -2401,6 +2410,7 @@ void WS2812FX::restartRuntime() {
 void WS2812FX::setTransitionMode(bool start) {
   suspend();
   waitForIt();
+  _stateCacheValid = false;
   for (Segment &seg : _segments) {
     if (start) seg.startTransition(_transitionDur, TRANSITION_KIND_DEFAULT | _poweringOnOff); // set color kind to let startTransition() determine if we need a segment copy or not
     else seg.stopTransition();
@@ -2546,6 +2556,7 @@ void WS2812FX::purgeSegments() {
       _segments.erase(_segments.begin() + i);
     }
   if (deleted) {
+    _stateCacheValid = false;
     _segments.shrink_to_fit();
     setMainSegmentId(0);
   }
@@ -2560,6 +2571,7 @@ Segment& WS2812FX::getSegment(unsigned id) {
 // loop() context
 void WS2812FX::resetSegments() {
   if (isServicing()) return;
+  _stateCacheValid = false;
   _segments.clear();          // destructs all Segment as part of clearing
   _segments.emplace_back(0, isMatrix ? Segment::maxWidth : _length, 0, isMatrix ? Segment::maxHeight : 1);
   if (getActiveSegmentsNum() == 0) {
@@ -2573,6 +2585,7 @@ void WS2812FX::resetSegments() {
 
 void WS2812FX::makeAutoSegments(bool forceReset) {
   if (isServicing()) return;
+  _stateCacheValid = false;
   if (autoSegments) { //make one segment per bus
     unsigned segStarts[MAX_NUM_SEGMENTS] = {0};
     unsigned segStops [MAX_NUM_SEGMENTS] = {0};
@@ -2649,6 +2662,7 @@ void WS2812FX::makeAutoSegments(bool forceReset) {
 
 void WS2812FX::fixInvalidSegments() {
   if (isServicing()) return;
+  _stateCacheValid = false;
   //make sure no segment is longer than total (sanity check)
   for (size_t i = getSegmentsNum()-1; i > 0; i--) {
     if (isMatrix) {
@@ -2766,33 +2780,7 @@ bool WS2812FX::loadForwardMapFromFile(unsigned n) {
     const unsigned matrixSize = (unsigned)Segment::maxWidth * Segment::maxHeight;
     for (unsigned i = 0; i < matrixSize; i++) customMappingTable[i] = 0xFFFFU;
     for (unsigned i = matrixSize; i < mapSize; i++) customMappingTable[i] = i;
-    int8_t *gapTable = nullptr;
-    File gf = WLED_FS.open("/2d-gaps.json", "r");
-    if (gf) {
-      gapTable = static_cast<int8_t*>(p_malloc(matrixSize));
-      if (gapTable) {
-        int val; unsigned cnt = 0;
-        while (cnt < matrixSize && readNextIntFromFile(gf, val)) gapTable[cnt++] = (int8_t)constrain(val, -1, 1);
-        if (cnt < matrixSize) { p_free(gapTable); gapTable = nullptr; }
-      }
-      gf.close();
-    }
-    unsigned pix = 0;
-    for (const Panel &p : panel) {
-      const unsigned h = p.vertical ? p.height : p.width;
-      const unsigned v = p.vertical ? p.width  : p.height;
-      for (size_t j = 0; j < v; j++) {
-        for (size_t i = 0; i < h; i++) {
-          unsigned y = (p.vertical ? p.rightStart  : p.bottomStart) ? v - j - 1 : j;
-          unsigned x = (p.vertical ? p.bottomStart : p.rightStart)  ? h - i - 1 : i;
-          if (p.serpentine && (j & 1)) x = h - x - 1;
-          const size_t index = (p.yOffset + (p.vertical ? x : y)) * Segment::maxWidth + p.xOffset + (p.vertical ? y : x);
-          if (!gapTable || gapTable[index] >  0) customMappingTable[index] = pix;
-          if (!gapTable || gapTable[index] >= 0) pix++;
-        }
-      }
-    }
-    p_free(gapTable);
+    buildPanelGapMap(customMappingTable, mapSize, true);
     return true;
   }
 #endif

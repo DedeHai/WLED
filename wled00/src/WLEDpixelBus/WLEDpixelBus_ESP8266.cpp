@@ -124,6 +124,7 @@ void Esp8266UartBus::end() {
 
   if (_pin == 2) Serial1.end();
   else Serial.end();
+  releaseEncodeBuffer();
   _initialized = false;
 }
 

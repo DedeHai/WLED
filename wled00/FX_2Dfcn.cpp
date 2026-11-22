@@ -59,13 +59,11 @@ void WS2812FX::setUpMatrix() {
     _invMappingSize = 0;
 
     unsigned matrixSize = Segment::maxWidth * Segment::maxHeight;
-    char fileName[32]; strcpy_P(fileName, PSTR("/2d-gaps.json"));
-    bool isFile = WLED_FS.exists(fileName);
 
     // Only allocate _invMappingTable here if ESP8266 no-buffer mode or /2d-gaps.json is present.
     // Pure panel[] setups on _physMap builds compute phys<->log directly from panel[] with 0 mapping RAM.
 #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
-    if (!isFile) {
+    if (!WLED_FS.exists(F("/2d-gaps.json"))) {
       _physMapHash = 0; // pure panel[] math needs no _invMappingTable
       return;
     }
@@ -77,62 +75,7 @@ void WS2812FX::setUpMatrix() {
       for (unsigned i = 0; i < _length; i++) {
         _invMappingTable[i] = (i >= matrixSize) ? (uint16_t)i : 0xFFFFU;
       }
-
-      // we will try to load a "gap" array (a JSON file)
-      // the array has to have the same amount of values as mapping array (or larger)
-      // "gap" array is used while building ledmap (mapping array)
-      // and discarded afterwards as it has no meaning after the process
-      // content of the file is just raw JSON array in the form of [val1,val2,val3,...]
-      // there are no other "key":"value" pairs in it
-      // allowed values are: -1 (missing pixel/no LED attached), 0 (inactive/unused pixel), 1 (active/used pixel)
-      int8_t *gapTable = nullptr;
-
-      if (isFile) {
-        DEBUG_PRINT(F("Reading LED gap from "));
-        DEBUG_PRINTLN(fileName);
-        // read the gap array directly from the file, a file with fewer entries than matrix positions is ignored
-        // the array is similar to ledmap, except it has only 3 values:
-        // -1 ... missing pixel (do not increase pixel count)
-        //  0 ... inactive pixel (it does count, but should be mapped out (-1))
-        //  1 ... active pixel (it will count and will be mapped)
-        File f = WLED_FS.open(fileName, "r");
-        if (f) {
-          gapTable = static_cast<int8_t*>(p_malloc(matrixSize));
-          if (gapTable) {
-            int value;
-            unsigned count = 0;
-            while (count < matrixSize && readNextIntFromFile(f, value)) {
-              gapTable[count++] = (int8_t)constrain(value, -1, 1);
-            }
-            if (count < matrixSize) { // incomplete gap file, ignore it so below loop does not read OOB
-              p_free(gapTable);
-              gapTable = nullptr;
-            }
-          }
-          f.close();
-        }
-        DEBUG_PRINTLN(F("Gaps loaded."));
-      }
-
-      unsigned x, y, pix=0; //pixel
-      for (const Panel &p : panel) {
-        unsigned h = p.vertical ? p.height : p.width;
-        unsigned v = p.vertical ? p.width  : p.height;
-        for (size_t j = 0; j < v; j++){
-          for(size_t i = 0; i < h; i++) {
-            y = (p.vertical?p.rightStart:p.bottomStart) ? v-j-1 : j;
-            x = (p.vertical?p.bottomStart:p.rightStart) ? h-i-1 : i;
-            x = p.serpentine && j%2 ? h-x-1 : x;
-            size_t index = (p.yOffset + (p.vertical?x:y)) * Segment::maxWidth + p.xOffset + (p.vertical?y:x);
-            if (gapTable) _hasPanelGaps = true;
-            if ((!gapTable || gapTable[index] > 0) && pix < _invMappingSize) _invMappingTable[pix] = (uint16_t)index;
-            if (!gapTable || (gapTable && gapTable[index] >= 0)) pix++; // not a missing pixel
-          }
-        }
-      }
-
-      // delete gap array as we no longer need it
-      p_free(gapTable);
+      buildPanelGapMap(_invMappingTable, _invMappingSize, false, &_hasPanelGaps);
 
       #ifdef WLED_DEBUG
       DEBUG_PRINT(F("Matrix invMap:"));
@@ -162,6 +105,57 @@ void WS2812FX::setUpMatrix() {
 #endif
 }
 
+
+#ifndef WLED_DISABLE_2D
+void WS2812FX::buildPanelGapMap(uint16_t* table, size_t tableLen, bool forward, bool* outHasGaps) const {
+  if (!table || !tableLen) return;
+  const unsigned matrixSize = (unsigned)Segment::maxWidth * Segment::maxHeight;
+  int8_t* gapTable = nullptr;
+  char fileName[16];
+  strcpy_P(fileName, PSTR("/2d-gaps.json"));
+  if (WLED_FS.exists(fileName)) {
+    DEBUG_PRINT(F("Reading LED gap from "));
+    DEBUG_PRINTLN(fileName);
+    File f = WLED_FS.open(fileName, "r");
+    if (f) {
+      gapTable = static_cast<int8_t*>(p_malloc(matrixSize));
+      if (gapTable) {
+        int value;
+        unsigned count = 0;
+        while (count < matrixSize && readNextIntFromFile(f, value)) {
+          gapTable[count++] = (int8_t)constrain(value, -1, 1);
+        }
+        if (count < matrixSize) {
+          p_free(gapTable);
+          gapTable = nullptr;
+        }
+      }
+      f.close();
+    }
+    DEBUG_PRINTLN(F("Gaps loaded."));
+  }
+  if (gapTable && outHasGaps) *outHasGaps = true;
+  unsigned pix = 0;
+  for (const Panel &p : panel) {
+    const unsigned h = p.vertical ? p.height : p.width;
+    const unsigned v = p.vertical ? p.width  : p.height;
+    for (size_t j = 0; j < v; j++) {
+      for (size_t i = 0; i < h; i++) {
+        const unsigned y = (p.vertical ? p.rightStart  : p.bottomStart) ? v - j - 1 : j;
+        unsigned x       = (p.vertical ? p.bottomStart : p.rightStart)  ? h - i - 1 : i;
+        if (p.serpentine && (j & 1)) x = h - x - 1;
+        const size_t index = (p.yOffset + (p.vertical ? x : y)) * Segment::maxWidth + p.xOffset + (p.vertical ? y : x);
+        if (!gapTable || gapTable[index] > 0) {
+          if (forward) { if (index < tableLen) table[index] = (uint16_t)pix; }
+          else         { if (pix   < tableLen) table[pix]   = (uint16_t)index; }
+        }
+        if (!gapTable || gapTable[index] >= 0) pix++;
+      }
+    }
+  }
+  p_free(gapTable);
+}
+#endif
 
 ///////////////////////////////////////////////////////////
 // Segment:: routines

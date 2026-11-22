@@ -191,16 +191,16 @@ BusDigital::BusDigital(const BusConfig &bc)
     BusChannelLayout wireLayout = bc.channels;
     if (!wireLayout.custom && wireLayout.numChannels == 0)
       resolveChannelLayout(wireLayout, _protocolType, bc.colorOrder);
-    _busProperties = makeBusProperties(wireLayout, _protocolType); // single assembly point for the wire descriptor
-    if (_busProperties.numChannels == 0 || _busProperties.numChannels > WLEDpixelBus::MAX_CUSTOM_CHANNELS) {
+    WLEDpixelBus::BusProperties busProps = makeBusProperties(wireLayout, _protocolType); // single assembly point for the wire descriptor
+    if (busProps.numChannels == 0 || busProps.numChannels > WLEDpixelBus::MAX_CUSTOM_CHANNELS) {
       cleanup();
       return;
     }
-    _busPtr = PixelBusAllocator::create(_protocolType, _pins, lenToCreate + _skip, bc.colorOrder, _driverType, bc.busSpeedFactor, _frequencykHz, &_busProperties);
-    applyChannelCapabilities(_busProperties.channelMap, _busProperties.numChannels);
+    _busPtr = PixelBusAllocator::create(_protocolType, _pins, lenToCreate + _skip, bc.colorOrder, _driverType, bc.busSpeedFactor, _frequencykHz, &busProps);
+    applyChannelCapabilities(busProps.channelMap, busProps.numChannels);
     if (_hasWhite) _autoWhiteMode = bc.autoWhite;
     // A custom map can still use ColorOrderMap when it is the saved color-order permutation. Anything else cannot.
-    colorOrderMapApplies = !bc.channels.custom ? !legacyHasFixedChannelMap(_protocolType) : legacyChannelMapMatchesColorOrder(_busProperties, _colorOrder, _protocolType);
+    colorOrderMapApplies = !bc.channels.custom ? !legacyHasFixedChannelMap(_protocolType) : legacyChannelMapMatchesColorOrder(busProps, _colorOrder, _protocolType);
   } else {
     _busPtr = PixelBusAllocator::create(bc.type, _pins, lenToCreate + _skip, bc.colorOrder, _driverType, bc.busSpeedFactor, _frequencykHz);
     // note: bc.channels.custom ignored for 2-pin buses as it is not supported, only permutations of RGB/W are used
@@ -401,81 +401,106 @@ void BusDigital::updateFromBuffer(const PullPixelContext &ctx) {
   // note: ABL is supported here (the colour sum is accumulated inline, the limit itself is
   // applied later in BusManager::show() -> applyBriLimit()), so enabling ABL does not
   // force the bus onto the slow general path any more.
-  if (pixelData && _busPtr->usesRawPixelBuffer() && pixelFormat == 3 && !_hasColorOrderMap &&
-      !enc.hasInvertedChannels() && !hasWhite() && !hasCCT() &&
-      ctx.uniformCCT && Bus::_cct < 1900) {
-    if (busBri == 0) {
-      memset(pixelData + (size_t)_skip * 3, 0, (size_t)_len * 3);
-      return;
-    }
-    const bool doABL = BusManager::_useABL;
-    const bool wackyWS2815 = (_milliAmpsPerLed >= 255);
-    const uint8_t idxR = enc.idxR();
-    const uint8_t idxG = enc.idxG();
-    const uint8_t idxB = enc.idxB();
-    const int step = _reversed ? -3 : 3;
-    uint8_t* out = pixelData + (size_t)(_reversed ? (_skip + _len - 1) : _skip) * 3;
-    const uint8_t briScale = (uint8_t)(busBri + 1);
-    uint32_t colorSum = _colorSum;
+  const bool fastRgb3 = pixelFormat == 3 && !_hasColorOrderMap &&
+                        !enc.hasInvertedChannels() && !hasWhite() && !hasCCT() &&
+                        ctx.uniformCCT && Bus::_cct < 1900;
+  const bool singleLinear1D = ctx.linear1D && ctx.useAffine && ctx.numPlans == 1 && ctx.plans[0].y1 == 1 && ctx.plans[0].blendMode == 0;
+  if (fastRgb3) {
+    const bool rawBuf = (pixelData != nullptr) && _busPtr->usesRawPixelBuffer();
+    if (rawBuf || singleLinear1D) {
+      const bool doABL = BusManager::_useABL;
+      const bool wackyWS2815 = (_milliAmpsPerLed >= 255);
+      const uint8_t briScale = (uint8_t)(busBri + 1);
+      uint32_t colorSum = _colorSum;
 
-    // Fast path for a single 1D affine segment with normal blend: direct pointer walk, no physMap/compose
-    if (ctx.linear1D && ctx.useAffine && ctx.numPlans == 1 && ctx.plans[0].y1 == 1 && ctx.plans[0].blendMode == 0) {
-      const SegPlan &pl = ctx.plans[0];
-      const uint16_t effScale = (pl.opacity == 255) ? (uint16_t)briScale
-        : ((busBri == 255) ? (uint16_t)(pl.opacity + 1) : (((uint16_t)(pl.opacity + 1) * briScale) >> 8));
-      if (effScale == 0) {
+      // Fast path 1: single 1D affine segment with normal blend (raw buffer or encoded buses like ESP8266 DMA)
+      if (singleLinear1D) {
+        const SegPlan &pl = ctx.plans[0];
+        const uint16_t effScale = (busBri == 0) ? 0
+          : ((pl.opacity == 255) ? (uint16_t)briScale
+            : ((busBri == 255) ? (uint16_t)(pl.opacity + 1) : (((uint16_t)(pl.opacity + 1) * briScale) >> 8)));
+        if (effScale == 0) {
+          if (rawBuf) {
+            memset(pixelData + (size_t)_skip * 3, 0, (size_t)_len * 3);
+          } else {
+            for (uint16_t p = 0; p < _len; ++p) _busPtr->setPixelColor(p + _skip, 0, 0);
+          }
+          return;
+        }
+        const uint16_t p0 = (pl.x0 > _start) ? (uint16_t)std::min<uint32_t>(pl.x0 - _start, _len) : 0;
+        const uint16_t p1 = (pl.x1 > _start) ? (uint16_t)std::min<uint32_t>(pl.x1 - _start, _len) : 0;
+        const uint32_t* src = (p0 < p1) ? (pl.pixels + ((int32_t)(_start + p0) * pl.tx + pl.base)) : nullptr;
+        if (rawBuf) {
+          const uint8_t idxR = enc.idxR(), idxG = enc.idxG(), idxB = enc.idxB();
+          const int step = _reversed ? -3 : 3;
+          uint8_t* out = pixelData + (size_t)(_reversed ? (_skip + _len - 1) : _skip) * 3;
+          uint16_t p = 0;
+          for (; p < p0; ++p, out += step) { out[idxR] = 0; out[idxG] = 0; out[idxB] = 0; }
+          for (; p < p1; ++p, out += step, src += pl.tx) {
+            uint32_t c = *src;
+            if (c == 0) { out[idxR] = 0; out[idxG] = 0; out[idxB] = 0; continue; }
+            if (effScale < 256) c = fast_color_scale(c, (uint8_t)effScale);
+            uint8_t r = R(c), g = G(c), b = B(c);
+            if (gt) { r = gt[r]; g = gt[g]; b = gt[b]; }
+            if (doABL) {
+              if (!wackyWS2815) colorSum += (uint32_t)r + g + b;
+              else              colorSum += ((r > g) ? ((r > b) ? r : b) : ((g > b) ? g : b));
+            }
+            out[idxR] = r; out[idxG] = g; out[idxB] = b;
+          }
+          for (; p < _len; ++p, out += step) { out[idxR] = 0; out[idxG] = 0; out[idxB] = 0; }
+        } else {
+          int busPix = _reversed ? (_skip + _len - 1) : _skip;
+          const int busStep = _reversed ? -1 : 1;
+          uint16_t p = 0;
+          for (; p < p0; ++p, busPix += busStep) _busPtr->setPixelColor(busPix, 0, 0);
+          for (; p < p1; ++p, busPix += busStep, src += pl.tx) {
+            uint32_t c = *src;
+            if (c == 0) { _busPtr->setPixelColor(busPix, 0, 0); continue; }
+            if (effScale < 256) c = fast_color_scale(c, (uint8_t)effScale);
+            uint8_t r = R(c), g = G(c), b = B(c);
+            if (gt) { r = gt[r]; g = gt[g]; b = gt[b]; }
+            if (doABL) {
+              if (!wackyWS2815) colorSum += (uint32_t)r + g + b;
+              else              colorSum += ((r > g) ? ((r > b) ? r : b) : ((g > b) ? g : b));
+            }
+            _busPtr->setPixelColor(busPix, RGBW32(r, g, b, 0), 0);
+          }
+          for (; p < _len; ++p, busPix += busStep) _busPtr->setPixelColor(busPix, 0, 0);
+        }
+        _colorSum = colorSum;
+        return;
+      }
+
+      // Fast path 2: raw 3-channel RGB buffer with generic pullPixel()
+      if (busBri == 0) {
         memset(pixelData + (size_t)_skip * 3, 0, (size_t)_len * 3);
         return;
       }
-      const uint16_t p0 = (pl.x0 > _start) ? (uint16_t)std::min<uint32_t>(pl.x0 - _start, _len) : 0;
-      const uint16_t p1 = (pl.x1 > _start) ? (uint16_t)std::min<uint32_t>(pl.x1 - _start, _len) : 0;
-      uint16_t p = 0;
-      for (; p < p0; ++p, out += step) {
-        out[idxR] = 0; out[idxG] = 0; out[idxB] = 0;
-      }
-      const uint32_t* src = pl.pixels + ((int32_t)(_start + p0) * pl.tx + pl.base);
-      for (; p < p1; ++p, out += step, src += pl.tx) {
-        uint32_t c = *src;
+      const uint8_t idxR = enc.idxR(), idxG = enc.idxG(), idxB = enc.idxB();
+      const int step = _reversed ? -3 : 3;
+      uint8_t* out = pixelData + (size_t)(_reversed ? (_skip + _len - 1) : _skip) * 3;
+      for (uint16_t p = 0; p < _len; ++p, out += step) {
+        uint8_t unusedCCT = 127;
+        uint32_t c = ctx.pullPixel(_start + p, unusedCCT);
         if (c == 0) {
           out[idxR] = 0; out[idxG] = 0; out[idxB] = 0;
           continue;
         }
-        if (effScale < 256) c = fast_color_scale(c, (uint8_t)effScale);
+        if (busBri < 255) c = fast_color_scale(c, briScale);
         uint8_t r = R(c), g = G(c), b = B(c);
         if (gt) { r = gt[r]; g = gt[g]; b = gt[b]; }
         if (doABL) {
           if (!wackyWS2815) colorSum += (uint32_t)r + g + b;
           else              colorSum += ((r > g) ? ((r > b) ? r : b) : ((g > b) ? g : b));
         }
-        out[idxR] = r; out[idxG] = g; out[idxB] = b;
-      }
-      for (; p < _len; ++p, out += step) {
-        out[idxR] = 0; out[idxG] = 0; out[idxB] = 0;
+        out[idxR] = r;
+        out[idxG] = g;
+        out[idxB] = b;
       }
       _colorSum = colorSum;
       return;
     }
-
-    for (uint16_t p = 0; p < _len; ++p, out += step) {
-      uint8_t unusedCCT = 127;
-      uint32_t c = ctx.pullPixel(_start + p, unusedCCT);
-      if (c == 0) {
-        out[idxR] = 0; out[idxG] = 0; out[idxB] = 0;
-        continue;
-      }
-      if (busBri < 255) c = fast_color_scale(c, briScale);
-      uint8_t r = R(c), g = G(c), b = B(c);
-      if (gt) { r = gt[r]; g = gt[g]; b = gt[b]; }
-      if (doABL) {
-        if (!wackyWS2815) colorSum += (uint32_t)r + g + b;
-        else              colorSum += ((r > g) ? ((r > b) ? r : b) : ((g > b) ? g : b));
-      }
-      out[idxR] = r;
-      out[idxG] = g;
-      out[idxB] = b;
-    }
-    _colorSum = colorSum;
-    return;
   }
 
   // General path: RGBW, CCT, 16-bit, ABL, color-order map, ESP8266 DMA, per-pixel CCT, inverted channels
@@ -547,9 +572,9 @@ void BusDigital::setPixelColor(unsigned pix, uint32_t c) {
   if (_reversed) pix = _len - pix -1;
   pix += _skip;
   CctPixel cct{};
-  if (c > 0) {
-    uint8_t bri = _busPtr->getBusBri();
-    bri = gamma8inv(bri); // gamma-invert brightness so dimming is linear after gamma correction (gammaCorrectBri if used is applied in setBrightness())
+  const uint8_t busBri = gamma8inv(_busPtr->getBusBri()); // gamma-invert brightness so dimming is linear after gamma correction
+  if (c > 0 && busBri > 0) {
+    uint8_t bri = busBri;
     c = color_fade(c, bri, false); // apply software brightness scaling (no op for 16bit types, residual scale if HW current scaling is used)
     c = gamma32(c); // apply gamma correction if (currently) used
     if (Bus::_cct >= 1900) c = colorBalanceFromKelvin(Bus::_cct, c); //color correction from CCT
@@ -566,6 +591,8 @@ void BusDigital::setPixelColor(unsigned pix, uint32_t c) {
         _colorSum += ((r > g) ? ((r > b) ? r : b) : ((g > b) ? g : b));
       }
     }
+  } else {
+    c = 0;
   }
 
   if (__builtin_expect(_hasColorOrderMap, 0)) {
@@ -657,9 +684,6 @@ bool BusDigital::isParHw() {
 void BusDigital::begin() {
   if (!_valid) return;
   if (!_busPtr->begin()) { cleanup(); return; }
-  // TM1914: write the static mode-setting prefix once after the encode buffer is allocated.
-  if (_busProperties.prefixLen > 0)
-    _busPtr->updatePrefix(_busProperties.prefixData, _busProperties.prefixLen);
 }
 
 void BusDigital::cleanup() {
@@ -1503,7 +1527,65 @@ BusHub75Matrix::BusHub75Matrix(const BusConfig &bc) : Bus(bc.type, bc.start, bc.
   }
 }
 
-void IRAM_ATTR BusHub75Matrix::setPixelColor(unsigned pix, uint32_t c) {
+void BusHub75Matrix::clearPixels() {
+  if (!_valid || !display) return;
+  display->clearScreen();
+  if (_ledsDirty) setBitArray(_ledsDirty, _len, false);
+#ifdef WLED_HUB75_EXTRA_BUFFER
+  if (_ledBuffer) memset(_ledBuffer, 0, (size_t)_len * sizeof(CRGB));
+#endif
+}
+
+void BusHub75Matrix::updateFromBuffer(const PullPixelContext &ctx) {
+  if (!_valid || !_panelWidth) return;
+  const uint8_t* gt = applyGamma ? NeoGammaWLEDMethod::gammaTable() : nullptr;
+#ifdef WLED_HUB75_EXTRA_BUFFER
+  if (_ledBuffer) {
+    for (uint16_t p = 0; p < _len; ++p) {
+      uint8_t unusedCCT = 127;
+      const uint32_t c = ctx.pullPixel(_start + p, unusedCCT);
+      uint8_t r = 0, g = 0, b = 0;
+      if (c & 0x00FFFFFFu) {
+        r = R(c); g = G(c); b = B(c);
+        if (gt) { r = gt[r]; g = gt[g]; b = gt[b]; }
+      }
+      CRGB fastled_col(r, g, b);
+      if (_ledBuffer[p] != fastled_col) {
+        _ledBuffer[p] = fastled_col;
+        setBitInArray(_ledsDirty, p, true);
+      }
+    }
+    return;
+  }
+#endif
+  const uint16_t width = _panelWidth;
+  auto writeLoop = [&](auto* target) {
+    uint16_t x = 0, y = 0;
+    for (uint16_t p = 0; p < _len; ++p) {
+      uint8_t unusedCCT = 127;
+      const uint32_t c = ctx.pullPixel(_start + p, unusedCCT);
+      uint8_t r = 0, g = 0, b = 0;
+      if (c & 0x00FFFFFFu) {
+        r = R(c); g = G(c); b = B(c);
+        if (gt) { r = gt[r]; g = gt[g]; b = gt[b]; }
+      }
+      if ((r | g | b) == 0) {
+        if (getBitFromArray(_ledsDirty, p)) {
+          setBitInArray(_ledsDirty, p, false);
+          target->drawPixelRGB888(int16_t(x), int16_t(y), 0, 0, 0);
+        }
+      } else {
+        setBitInArray(_ledsDirty, p, true);
+        target->drawPixelRGB888(int16_t(x), int16_t(y), r, g, b);
+      }
+      if (++x == width) { x = 0; ++y; }
+    }
+  };
+  if (virtualDisp != nullptr) writeLoop(virtualDisp);
+  else if (display != nullptr) writeLoop(display);
+}
+
+void BusHub75Matrix::setPixelColor(unsigned pix, uint32_t c) {
   if (!_valid) return; // note: no need to check pix >= _len as that is checked in containsPixel()
   c = gamma32(c); // apply gamma correction if (currently) used  Note: brightness scaling is done by hardware driver, see setBrightness16()
   // if (_cct >= 1900) c = colorBalanceFromKelvin(_cct, c); //color correction from CCT
@@ -1894,7 +1976,7 @@ void BusManager::show() {
 void BusManager::blank() {
   // Set all pixels to black
   for (auto &bus : busses) {
-    if (bus->isDigital()) { bus->clearPixels(); continue; }
+    if (bus->isDigital() || bus->isHub75()) { bus->clearPixels(); continue; }
     for (uint16_t pix = 0; pix < bus->getLength(); ++pix) {
       bus->setPixelColor(pix, BLACK);
     }

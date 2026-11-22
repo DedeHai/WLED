@@ -107,10 +107,8 @@ typedef struct {
 //   _physOwner[]  1 B/px owner code (prefers internal RAM)
 //        0 .. 63                   direct owner -> index of the owning segment
 //        PHYS_SEG_BLACK            no segment covers this physical pixel
-//        PHYS_SEG_COMPOSE + 0      compose, 1D, affine fast path
-//        PHYS_SEG_COMPOSE + 1      compose, 1D, generic (slow) compose
-//        PHYS_SEG_COMPOSE + 2      compose, 2D, affine fast path
-//        PHYS_SEG_COMPOSE + 3      compose, 2D, generic (slow) compose
+//        PHYS_SEG_COMPOSE + 0      compose, 1D
+//        PHYS_SEG_COMPOSE + 1      compose, 2D
 //
 //   _physIdx[]    2 B/px payload (PSRAM when available)
 //        direct owner -> index into the owning segment's own pixel buffer
@@ -182,16 +180,15 @@ struct PullPixelContext {
         return c;
       }
       if (owner > PHYS_SEG_BLACK) {
-        // owner - PHYS_SEG_COMPOSE: bit0 = needs the generic compose, bit1 = 2D coordinate
-        const uint8_t variant = (uint8_t)(owner - PHYS_SEG_COMPOSE);
+        // PHYS_SEG_COMPOSE + 0 = 1D, PHYS_SEG_COMPOSE + 1 = 2D
+        const bool is2D = (owner > PHYS_SEG_COMPOSE);
         const uint16_t idx = physIdx[globalPix];
-        if (useAffine && !(variant & 1u)) {
-          // affine fast path: 1D pixels carry a logical index, 2D pixels an (x,y) pair
-          const uint16_t ax = (variant & 2u) ? (uint16_t)(idx & 0xFFu) : idx;
-          const uint16_t ay = (variant & 2u) ? (uint16_t)(idx >> 8) : 0;
+        if (useAffine) {
+          const uint16_t ax = is2D ? (uint16_t)(idx & 0xFFu) : idx;
+          const uint16_t ay = is2D ? (uint16_t)(idx >> 8) : 0;
           return composeAffine(ax, ay, outCCT);
         }
-        return composeSlow(fxPtr, idx, (variant & 2u) != 0, outCCT);
+        return composeSlow(fxPtr, idx, is2D, outCCT);
       }
     }
     return 0;
@@ -258,6 +255,7 @@ class Bus {
     inline  bool     isOnOff() const                            { return isOnOff(_type); }
     inline  bool     isPWM() const                              { return isPWM(_type); }
     inline  bool     isVirtual() const                          { return isVirtual(_type); }
+    inline  bool     isHub75() const                            { return isHub75(_type); }
     inline  bool     is16bit() const                            { return is16bit(_type); }
     virtual bool     isPlaceholder() const                      { return false; }
     inline  bool     mustRefresh() const                        { return mustRefresh(_type); }
@@ -386,7 +384,6 @@ class BusDigital : public Bus {
     uint16_t _milliAmpsLimit;
     uint16_t _frequencykHz;
     uint32_t _colorSum = 0;           // sum of brightness-scaled channel bytes; updated in setPixelColor() when ABL active
-    WLEDpixelBus::BusProperties _busProperties; // assembled wire descriptor (from BusConfig), also used by begin() for the prefix upload
     WLEDpixelBus::PixelBus* _busPtr = nullptr;
     BusChannelLayout _channels; // configured channel layout as passed in BusConfig (user-entered when custom)
 
@@ -516,7 +513,9 @@ class BusPlaceholder : public Bus {
 class BusHub75Matrix : public Bus {
   public:
     BusHub75Matrix(const BusConfig &bc);
+    void clearPixels() override;
     [[gnu::hot]] void setPixelColor(unsigned pix, uint32_t c) override;
+    [[gnu::hot]] void updateFromBuffer(const PullPixelContext &ctx) override;
     [[gnu::hot]] uint32_t getPixelColor(unsigned pix) const override;
     void show() override;
     void setBrightness16(uint16_t b) override;
@@ -539,7 +538,9 @@ class BusHub75Matrix : public Bus {
     uint8_t _cols = 1; // panels per column
     bool _isVirtual = false; // note: this is not strictly needed but there are padding bytes here anyway
     bool _isQuadScan = false;
+#ifdef WLED_HUB75_EXTRA_BUFFER
     CRGB *_ledBuffer = nullptr; // note: using uint32_t buffer is only 2% faster and not worth the extra RAM
+#endif
     byte *_ledsDirty = nullptr;
     // workaround for missing constants on include path for non-MM
     static constexpr uint32_t IS_BLACK = 0x000000u;
