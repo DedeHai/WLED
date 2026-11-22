@@ -142,41 +142,32 @@ struct SegPlan {
 };
 
 struct PullPixelContext {
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
   const uint32_t* const* segPixels;
   const uint8_t*         segOpacity;
   const uint8_t*         segCCT;
-  uint8_t                numActive;
-  bool                   uniformCCT;
-  bool                   correctWB;
-  bool                   cctFromRgb;
-#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
   const uint8_t*         physOwner;
   const uint16_t*        physIdx;
   uint16_t               physMapLen;
 #else
   const uint16_t*        invMap;
   uint16_t               invMapLen;
+  uint16_t               matrixW;
+  uint32_t               matrixSize;
 #endif
+  uint8_t                numActive;
+  bool                   uniformCCT;
+  bool                   correctWB;
+  bool                   cctFromRgb;
   const SegPlan*         plans;      // affine render plan, one entry per active segment
   uint8_t                numPlans;
   bool                   useAffine;  // true: every active segment has an affine plan
+  bool                   linear1D;   // true: physical == logical 1D strip (no matrix/ledmap/gaps)
   uint32_t (*composeSlow)(const void* fxPtr, uint32_t logOrXY, bool is2DXY, uint8_t &outCCT);
   const void* fxPtr;
 
-  // Affine fast-path compose: blends every segment covering the given logical coordinate.
-  // No per-pixel coordinate arithmetic and no function call - all of it was hoisted into
-  // the plan. Segment order matches the generic compose, so results are identical.
-  inline uint32_t composeAffine(uint16_t x, uint16_t y, uint8_t &outCCT) const {
-    uint32_t accum = 0;
-    for (uint8_t s = 0; s < numPlans; s++) {
-      const SegPlan &pl = plans[s];
-      if (x < pl.x0 || x >= pl.x1 || y < pl.y0 || y >= pl.y1) continue;
-      const uint32_t c_a = pl.pixels[(int32_t)x * pl.tx + (int32_t)y * pl.ty + pl.base];
-      accum = color_blend(accum, segblend(pl.blendMode, c_a, accum), pl.opacity);
-      outCCT = pl.cct;
-    }
-    return accum;
-  }
+  // Out-of-line in bus_manager.cpp so a single copy serves all callers without bloating flash.
+  uint32_t composeAffine(uint16_t x, uint16_t y, uint8_t &outCCT) const;
 
   inline uint32_t pullPixel(uint16_t globalPix, uint8_t &outCCT) const {
 #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
@@ -186,10 +177,7 @@ struct PullPixelContext {
         uint32_t c = segPixels[owner][physIdx[globalPix]];
         const uint8_t op = segOpacity[owner];
         if (op == 0) c = 0;
-        else if (op < 255) {
-          const uint8_t sc = (uint8_t)(op + 1);
-          c = ((((c & 0x00FF00FFu) * sc) >> 8) & 0x00FF00FFu) | ((((c >> 8) & 0x00FF00FFu) * sc) & ~0x00FF00FFu);
-        }
+        else if (op < 255) c = fast_color_scale(c, (uint8_t)(op + 1));
         outCCT = segCCT[owner];
         return c;
       }
@@ -199,8 +187,9 @@ struct PullPixelContext {
         const uint16_t idx = physIdx[globalPix];
         if (useAffine && !(variant & 1u)) {
           // affine fast path: 1D pixels carry a logical index, 2D pixels an (x,y) pair
-          if (variant & 2u) return composeAffine((uint16_t)(idx & 0xFFu), (uint16_t)(idx >> 8), outCCT);
-          return composeAffine(idx, 0, outCCT);
+          const uint16_t ax = (variant & 2u) ? (uint16_t)(idx & 0xFFu) : idx;
+          const uint16_t ay = (variant & 2u) ? (uint16_t)(idx >> 8) : 0;
+          return composeAffine(ax, ay, outCCT);
         }
         return composeSlow(fxPtr, idx, (variant & 2u) != 0, outCCT);
       }
@@ -209,6 +198,12 @@ struct PullPixelContext {
 #else
     const uint16_t logIdx = invMap ? (globalPix < invMapLen ? invMap[globalPix] : 0xFFFFu) : globalPix;
     if (logIdx == 0xFFFFu) return 0;
+    if (useAffine) {
+      const bool is2D = (matrixSize && logIdx < matrixSize);
+      const uint16_t ax = is2D ? (uint16_t)(logIdx % matrixW) : logIdx;
+      const uint16_t ay = is2D ? (uint16_t)(logIdx / matrixW) : 0;
+      return composeAffine(ax, ay, outCCT);
+    }
     return composeSlow(fxPtr, logIdx, false, outCCT);
 #endif
   }

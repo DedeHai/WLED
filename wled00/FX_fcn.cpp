@@ -1979,6 +1979,7 @@ bool WS2812FX::buildSegPlans(const SegRenderState* states, uint8_t numActive, Se
   uint8_t n = 0;
   for (uint8_t i = 0; i < numActive; i++) {
     const SegRenderState &s = states[i];
+    if (!s.pixels) return false;                // missing pixel buffer
     if (s.segO) return false;                   // transition: two sources per segment
     if (s.groupLen != 1) return false;         // grouping/spacing replicates pixels
     if (s.mirror || s.mirror_y) return false;   // mirrored segments are only piecewise affine
@@ -2039,18 +2040,6 @@ uint32_t WS2812FX::composeLogicalPixel(uint32_t logOrXY, bool is2DXY, const SegR
     }
   }
 
-  // Inline fast path for a single simple segment (e.g. ESP8266 1D strip)
-  if (numActive == 1 && states[0].isSimple && states[0].blendMode == 0) {
-    const SegRenderState &s = states[0];
-    uint16_t c = 0, r = 0;
-    if (!resolveSegmentVirtualCoord(s, logIdx, x, y, is2DCoord, c, r)) return BLACK;
-    uint32_t col = s.pixels ? s.pixels[c + r * s.nCols] : BLACK;
-    if (s.opacity == 0) col = BLACK;
-    else if (s.opacity < 255) col = fast_color_scale(col, (uint8_t)(s.opacity + 1));
-    outCCT = s.cct;
-    return col;
-  }
-
   uint32_t accum = BLACK;
   for (uint8_t idx = 0; idx < numActive; idx++) {
     const SegRenderState &s = states[idx];
@@ -2088,8 +2077,15 @@ uint32_t WS2812FX::composeLogicalPixel(uint32_t logOrXY, bool is2DXY, const SegR
       if ((s.powerOffTrans && !clipped) || (s.powerOnTrans && clipped)) c_a = BLACK;
     }
 
-    accum = color_blend(accum, segblend(s.blendMode, c_a, accum), pixelOpacity);
     outCCT = s.cct;
+    if (pixelOpacity == 0) continue;
+    if (s.blendMode == 0 && pixelOpacity == 255) {
+      accum = c_a;
+    } else {
+      const uint32_t blended = segblend(s.blendMode, c_a, accum);
+      if (pixelOpacity == 255) accum = blended;
+      else accum = accum ? color_blend(accum, blended, pixelOpacity) : fast_color_scale(blended, (uint8_t)(pixelOpacity + 1));
+    }
   }
   return accum;
 }
@@ -2276,14 +2272,18 @@ void WS2812FX::show() {
     SegRenderState* const states = _stateBuf;
     SegPlan* const plans = _planBuf;
     uint8_t numPlans = 0;
-    const uint32_t* segPixels[MAX_NUM_SEGMENTS];
-    uint8_t segOpacity[MAX_NUM_SEGMENTS];
-    uint8_t segCCT[MAX_NUM_SEGMENTS];
     uint8_t numActive = 0;
     bool uniformCCT = true;
     uint8_t uniformCCTVal = 127;
 
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
+    const uint32_t* segPixels[MAX_NUM_SEGMENTS];
+    uint8_t segOpacity[MAX_NUM_SEGMENTS];
+    uint8_t segCCT[MAX_NUM_SEGMENTS];
     buildFrameStates(states, _renderBufCap, segPixels, segOpacity, segCCT, numActive, uniformCCT, uniformCCTVal);
+#else
+    buildFrameStates(states, _renderBufCap, nullptr, nullptr, nullptr, numActive, uniformCCT, uniformCCTVal);
+#endif
     // hoisted, frame-invariant render plan: lets the bus layer compose pixels without
     // re-deriving segment coordinates for every pixel
     const bool allAffine = buildSegPlans(states, numActive, plans, numPlans);
@@ -2292,26 +2292,29 @@ void WS2812FX::show() {
     _frameNumActive = numActive;
 
     PullPixelContext ctx{};
+#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
     ctx.segPixels   = segPixels;
     ctx.segOpacity  = segOpacity;
     ctx.segCCT      = segCCT;
-    ctx.numActive   = numActive;
-    ctx.uniformCCT  = uniformCCT || cctFromRgb;
-    ctx.correctWB   = correctWB;
-    ctx.cctFromRgb  = cctFromRgb;
-#ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
     ctx.physOwner   = _physOwner;
     ctx.physIdx     = _physIdx;
     ctx.physMapLen  = (_physOwner && _physIdx) ? _physMapLen : 0;
 #else
     ctx.invMap      = _invMappingTable;
     ctx.invMapLen   = _invMappingSize;
+    ctx.matrixW     = Segment::maxWidth;
+    ctx.matrixSize  = isMatrix ? ((uint32_t)Segment::maxWidth * Segment::maxHeight) : 0;
 #endif
+    ctx.numActive   = numActive;
+    ctx.uniformCCT  = uniformCCT || cctFromRgb;
+    ctx.correctWB   = correctWB;
+    ctx.cctFromRgb  = cctFromRgb;
     ctx.composeSlow = WS2812FX::composeSlowCallback;
     ctx.fxPtr       = this;
     ctx.plans       = plans;
     ctx.numPlans    = numPlans;
     ctx.useAffine   = allAffine;
+    ctx.linear1D    = !isMatrix && !_hasCustomFileMap && !_hasPanelGaps;
 
     const int oldCCT = Bus::getCCT();
     if (cctFromRgb) BusManager::setSegmentCCT(-1);

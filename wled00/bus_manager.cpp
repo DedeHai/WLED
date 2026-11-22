@@ -348,6 +348,25 @@ void BusDigital::clearPixels() {
   if (_valid && _busPtr) _busPtr->clearEncodeBuffer();
 }
 
+[[gnu::hot]] uint32_t PullPixelContext::composeAffine(uint16_t x, uint16_t y, uint8_t &outCCT) const {
+  uint32_t accum = 0;
+  for (uint8_t s = 0; s < numPlans; s++) {
+    const SegPlan &pl = plans[s];
+    if (x < pl.x0 || x >= pl.x1 || y < pl.y0 || y >= pl.y1) continue;
+    outCCT = pl.cct;
+    if (pl.opacity == 0) continue;
+    const uint32_t c_a = pl.pixels[(int32_t)x * pl.tx + (int32_t)y * pl.ty + pl.base];
+    if (pl.blendMode == 0 && pl.opacity == 255) {
+      accum = c_a;
+    } else {
+      const uint32_t blended = segblend(pl.blendMode, c_a, accum);
+      if (pl.opacity == 255) accum = blended;
+      else accum = accum ? color_blend(accum, blended, pl.opacity) : fast_color_scale(blended, (uint8_t)(pl.opacity + 1));
+    }
+  }
+  return accum;
+}
+
 //If LEDs are skipped, it is possible to use the first as a status LED.
 //TODO only show if no new show due in the next 50ms
 void Bus::updateFromBuffer(const PullPixelContext &ctx) {
@@ -385,6 +404,10 @@ void BusDigital::updateFromBuffer(const PullPixelContext &ctx) {
   if (pixelData && _busPtr->usesRawPixelBuffer() && pixelFormat == 3 && !_hasColorOrderMap &&
       !enc.hasInvertedChannels() && !hasWhite() && !hasCCT() &&
       ctx.uniformCCT && Bus::_cct < 1900) {
+    if (busBri == 0) {
+      memset(pixelData + (size_t)_skip * 3, 0, (size_t)_len * 3);
+      return;
+    }
     const bool doABL = BusManager::_useABL;
     const bool wackyWS2815 = (_milliAmpsPerLed >= 255);
     const uint8_t idxR = enc.idxR();
@@ -395,10 +418,48 @@ void BusDigital::updateFromBuffer(const PullPixelContext &ctx) {
     const uint8_t briScale = (uint8_t)(busBri + 1);
     uint32_t colorSum = _colorSum;
 
+    // Fast path for a single 1D affine segment with normal blend: direct pointer walk, no physMap/compose
+    if (ctx.linear1D && ctx.useAffine && ctx.numPlans == 1 && ctx.plans[0].y1 == 1 && ctx.plans[0].blendMode == 0) {
+      const SegPlan &pl = ctx.plans[0];
+      const uint16_t effScale = (pl.opacity == 255) ? (uint16_t)briScale
+        : ((busBri == 255) ? (uint16_t)(pl.opacity + 1) : (((uint16_t)(pl.opacity + 1) * briScale) >> 8));
+      if (effScale == 0) {
+        memset(pixelData + (size_t)_skip * 3, 0, (size_t)_len * 3);
+        return;
+      }
+      const uint16_t p0 = (pl.x0 > _start) ? (uint16_t)std::min<uint32_t>(pl.x0 - _start, _len) : 0;
+      const uint16_t p1 = (pl.x1 > _start) ? (uint16_t)std::min<uint32_t>(pl.x1 - _start, _len) : 0;
+      uint16_t p = 0;
+      for (; p < p0; ++p, out += step) {
+        out[idxR] = 0; out[idxG] = 0; out[idxB] = 0;
+      }
+      const uint32_t* src = pl.pixels + ((int32_t)(_start + p0) * pl.tx + pl.base);
+      for (; p < p1; ++p, out += step, src += pl.tx) {
+        uint32_t c = *src;
+        if (c == 0) {
+          out[idxR] = 0; out[idxG] = 0; out[idxB] = 0;
+          continue;
+        }
+        if (effScale < 256) c = fast_color_scale(c, (uint8_t)effScale);
+        uint8_t r = R(c), g = G(c), b = B(c);
+        if (gt) { r = gt[r]; g = gt[g]; b = gt[b]; }
+        if (doABL) {
+          if (!wackyWS2815) colorSum += (uint32_t)r + g + b;
+          else              colorSum += ((r > g) ? ((r > b) ? r : b) : ((g > b) ? g : b));
+        }
+        out[idxR] = r; out[idxG] = g; out[idxB] = b;
+      }
+      for (; p < _len; ++p, out += step) {
+        out[idxR] = 0; out[idxG] = 0; out[idxB] = 0;
+      }
+      _colorSum = colorSum;
+      return;
+    }
+
     for (uint16_t p = 0; p < _len; ++p, out += step) {
       uint8_t unusedCCT = 127;
       uint32_t c = ctx.pullPixel(_start + p, unusedCCT);
-      if (c == 0 || busBri == 0) {
+      if (c == 0) {
         out[idxR] = 0; out[idxG] = 0; out[idxB] = 0;
         continue;
       }

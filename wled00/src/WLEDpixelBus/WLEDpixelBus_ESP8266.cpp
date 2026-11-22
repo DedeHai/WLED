@@ -57,7 +57,7 @@ void IRAM_ATTR Esp8266UartBus::uartISR(void* arg, void* exceptionFrame) {
     // Check if this UART triggered a TX FIFO Empty interrupt
     if (instance && (USIS(uartNum) & (1 << UIFE))) {
       // Logic for bit expansion (Replaces the LUT)
-      const uint8_t uartData[4] = {0b110111, 0b000111, 0b110100, 0b000100};
+      static const uint8_t uartData[4] = {0b110111, 0b000111, 0b110100, 0b000100};
 
       // Calculate remaining space in the 128-byte hardware FIFO
       uint8_t avail = (128 - ((USS(uartNum) >> USTXC) & 0xff)) / 4;
