@@ -42,12 +42,14 @@ struct CHSV32;
 // WLED gamma correction lookup tables with runtime-adjustable gamma
 class WLEDGamma {
   public:
-    [[gnu::hot]] static uint32_t inverseGamma32(uint32_t color);    // apply inverse Gamma to RGBW32 color
     static void calcGammaTable(float gamma);                        // re-calculates & fills gamma tables
     static inline uint8_t rawGamma8(uint8_t val) { return gammaT[val]; }            // get value from Gamma table
     static inline uint8_t rawInverseGamma8(uint8_t val) { return gammaT_inv[val]; } // get value from inverse Gamma table
     static inline uint32_t Correct32(uint32_t color) {                              // apply Gamma to RGBW32 color
       return RGBW32(gammaT[R(color)], gammaT[G(color)], gammaT[B(color)], gammaT[W(color)]);
+    }
+    static inline uint32_t inverseGamma32(uint32_t color) { // apply inverse Gamma to RGBW32 color
+      return RGBW32(gammaT_inv[R(color)], gammaT_inv[G(color)], gammaT_inv[B(color)], gammaT_inv[W(color)]);
     }
   private:
     static uint8_t gammaT[];
@@ -58,10 +60,17 @@ class WLEDGamma {
 #define gamma32inv(c) WLEDGamma::inverseGamma32(c)
 #define gamma8inv(c)  WLEDGamma::rawInverseGamma8(c)
 [[gnu::hot, gnu::pure]] uint32_t color_blend(uint32_t c1, uint32_t c2 , uint8_t blend);
-inline uint32_t color_blend16(uint32_t c1, uint32_t c2, uint16_t b) { return color_blend(c1, c2, b >> 8); };
+[[gnu::hot, gnu::pure]] uint32_t color_blend_smooth(uint32_t c1, uint32_t c2, uint8_t blend);
 [[gnu::hot, gnu::pure]] uint32_t color_add(uint32_t, uint32_t, bool preserveCR = false);
 [[gnu::hot, gnu::pure]] uint32_t color_fade(uint32_t c1, uint8_t amount, bool video = false);
 void adjust_color(CRGBW& rgb, int32_t hueShift, int32_t satChange,int32_t valueChange);
+inline uint32_t color_blend16(uint32_t c1, uint32_t c2, uint16_t b) { return color_blend(c1, c2, b >> 8); };
+inline uint32_t avg2Floor(uint32_t a, uint32_t b) {
+  return (((a ^ b) & 0xFEFEFEFEu) >> 1) + (a & b); // fast floor((x + y) / 2) without channel unpacking
+}
+inline uint32_t avg2Ceil(uint32_t a, uint32_t b) {
+  return (a | b) - (((a ^ b) & 0xFEFEFEFEu) >> 1); // fast ceil((x + y) / 2)  without channel unpacking
+}
 
 [[gnu::hot, gnu::pure]] uint32_t ColorFromPalette(const CRGBPalette16 &pal, unsigned index, uint8_t brightness = (uint8_t)255U, TBlendType blendType = LINEARBLEND);
 CRGBPalette16 generateHarmonicRandomPalette(const CRGBPalette16 &basepalette);

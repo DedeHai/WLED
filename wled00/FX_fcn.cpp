@@ -63,6 +63,10 @@ Segment::Segment(const Segment &orig) {
   data = nullptr;
   _dataLen = 0;
   pixels = nullptr;
+#ifndef WLED_DISABLE_MODIFIERS
+  mods = nullptr;
+  modCnt = 0;
+#endif
   if (!stop) return;  // nothing to do if segment is inactive/invalid
   if (orig.pixels) {
     // allocate pixel buffer: prefer IRAM/PSRAM
@@ -71,6 +75,9 @@ Segment::Segment(const Segment &orig) {
       memcpy(pixels, orig.pixels, sizeof(uint32_t) * orig.length());
       if (orig.name) { name = static_cast<char*>(allocate_buffer(strlen(orig.name)+1, BFRALLOC_PREFER_PSRAM)); if (name) strcpy(name, orig.name); }
       if (orig.data) { if (allocateData(orig._dataLen)) memcpy(data, orig.data, orig._dataLen); }
+#ifndef WLED_DISABLE_MODIFIERS
+      copyMods(orig);
+#endif
     } else {
       DEBUGFX_PRINTLN(F("!!! Not enough RAM for pixel buffer !!!"));
       errorFlag = ERR_NORAM_PX;
@@ -88,6 +95,10 @@ Segment::Segment(Segment &&orig) noexcept {
   orig.data = nullptr;
   orig._dataLen = 0;
   orig.pixels = nullptr;
+#ifndef WLED_DISABLE_MODIFIERS
+  orig.mods = nullptr;
+  orig.modCnt = 0;
+#endif
 }
 
 // copy assignment
@@ -97,6 +108,7 @@ Segment& Segment::operator= (const Segment &orig) {
     // clean destination
     if (name) { p_free(name); name = nullptr; }
     stopTransition(); // delete _t
+    clearMods();
     deallocateData();
     p_free(pixels);
     pixels = nullptr;
@@ -105,6 +117,10 @@ Segment& Segment::operator= (const Segment &orig) {
     // erase pointers to allocated data
     data = nullptr;
     _dataLen = 0;
+#ifndef WLED_DISABLE_MODIFIERS
+    mods = nullptr;
+    modCnt = 0;
+#endif
     if (!stop) return *this;  // nothing to do if segment is inactive/invalid
     // copy source data
     if (orig.pixels) {
@@ -114,6 +130,9 @@ Segment& Segment::operator= (const Segment &orig) {
         memcpy(pixels, orig.pixels, sizeof(uint32_t) * orig.length());
         if (orig.name) { name = static_cast<char*>(allocate_buffer(strlen(orig.name)+1, BFRALLOC_PREFER_PSRAM)); if (name) strcpy(name, orig.name); }
         if (orig.data) { if (allocateData(orig._dataLen)) memcpy(data, orig.data, orig._dataLen); }
+#ifndef WLED_DISABLE_MODIFIERS
+        copyMods(orig);
+#endif
       } else {
         DEBUG_PRINTLN(F("!!! Not enough RAM for pixel buffer !!!"));
         errorFlag = ERR_NORAM_PX;
@@ -130,6 +149,7 @@ Segment& Segment::operator= (Segment &&orig) noexcept {
   if (this != &orig) {
     if (name) { p_free(name); name = nullptr; } // free old name
     stopTransition(); // delete _t
+    clearMods();
     deallocateData(); // free old runtime data
     p_free(pixels);   // free old pixel buffer
     // move source data
@@ -139,6 +159,10 @@ Segment& Segment::operator= (Segment &&orig) noexcept {
     orig._dataLen = 0;
     orig.pixels = nullptr;
     orig._t = nullptr; // old segment cannot be in transition
+#ifndef WLED_DISABLE_MODIFIERS
+    orig.mods = nullptr;
+    orig.modCnt = 0;
+#endif
   }
   return *this;
 }
@@ -634,6 +658,7 @@ void Segment::setGeometry(uint16_t i1, uint16_t i2, uint8_t grp, uint8_t spc, ui
 
   // Cleanup check
   auto newLength = length();
+  if (newLength != oldLength || newLength == 0) freeModBufs();
   if ((newLength > 0) && (newLength != oldLength)) {
     // allocate render buffer (always entire segment), prefer IRAM/PSRAM. Note: impact on FPS with PSRAM buffer is low (<2% with QSPI PSRAM) on S2/S3
     // Note we don't pass BFRALLOC_CLEAR as resetIfRequired() will initialize the buffer later
@@ -1235,6 +1260,58 @@ void Segment::fadeToBlackBy(uint8_t fadeBy) const {
   for (unsigned i = 0; i < rlength; i++) setPixelColorRaw(i, fast_color_scale(getPixelColorRaw(i), 255-fadeBy));
 }
 
+// Speed optimized Gaussian-like 1D blur: binomial [1,2,1]/4 + symmetric Neumann Fwd/Bwd IIR.
+// Blurring is done in linear space to preserve light output and dim sparse effects less.
+void blurGaussian(uint32_t *px, unsigned len, unsigned stride, uint8_t alpha, uint8_t bwdInit, bool preBinom, bool gammaIn, bool gammaOut) {
+  // Read pixel, converting to linear space if needed.
+  auto readLin = [&](const uint32_t *p) -> uint32_t {
+    uint32_t c = *p;
+    return gammaIn ? gamma32(c) : c;
+  };
+
+  uint32_t *lastPx = px + (len - 1) * stride;
+  uint32_t last = readLin(lastPx);
+  uint32_t s;
+  if (preBinom) {
+    uint32_t *p = px;
+    uint32_t prev = readLin(p);
+    uint32_t cur = prev;
+    s = cur;
+    // forward pass
+    while (p != lastPx) {
+      uint32_t next = readLin(p + stride);
+      uint32_t b = avg2Ceil(avg2Floor(prev, next), cur);
+      s = color_blend(s, b, alpha);
+      *p = s;
+      prev = cur;
+      cur = next;
+      p += stride;
+    }
+    uint32_t b = avg2Ceil(avg2Floor(prev, cur), cur);
+    s = color_blend(s, b, alpha);
+    *p = s;
+  } else {
+    s = readLin(px);
+    uint32_t *p = px;
+    // forward pass
+    while (true) {
+      s = color_blend(s, readLin(p), alpha);
+      *p = s;
+      if (p == lastPx) break;
+      p += stride;
+    }
+  }
+  s = color_blend(last, *lastPx, bwdInit);
+  uint32_t *p = lastPx;
+  // backward pass
+  while (true) {
+    s = color_blend(s, *p, alpha);
+    *p = gammaOut ? gamma32inv(s) : s;
+    if (p == px) break;
+    p -= stride;
+  }
+}
+
 /*
  * blurs segment content, source: FastLED colorutils.cpp
  * Note: for blur_amount > 215 this function does not work properly (creates alternating pattern)
@@ -1405,6 +1482,9 @@ void WS2812FX::finalizeInit() {
 
 // update global _pixels[] buffer to match getLengthTotal() note: if allocation fails, WLED will not render anything
 void WS2812FX::updatePixelBuffer() {
+#ifndef WLED_DISABLE_MODIFIERS
+  freeAllModBufs();
+#endif
   p_free(_pixels); // using realloc on large buffers can cause additional fragmentation instead of reducing it
   _pixels = nullptr;
   #ifdef WLED_DISABLE_GLOBAL_PIXELBUFFER
@@ -1450,6 +1530,12 @@ void WS2812FX::service() {
         seg.beginDraw(prog);                // set up parameters for get/setPixelColor() (will also blend colors and palette)
         _currentSegment = &seg;             // set current segment for effect functions (SEGMENT & SEGENV)
         // workaround for on/off transition to respect blending style
+#ifndef WLED_DISABLE_MODIFIERS
+        const SegMod *cm = seg.findMod(MOD_COPY, true);
+        if (cm) {
+          if (!(cm->flags & MOD_FLAG_STACK)) runCopyMod(seg, i, *cm, false);
+        } else
+#endif
         _mode[seg.mode]();                  // run new/current mode (needed for bri workaround)
         seg.call++;
         // if segment is in transition and no old segment exists we don't need to run the old mode
@@ -1895,6 +1981,422 @@ void WS2812FX::blendSegment(const Segment &topSegment) const {
   Segment::setClippingRect(0, 0);             // disable clipping for overlays
 }
 
+#ifndef WLED_DISABLE_MODIFIERS
+// AI: below section was generated by an AI
+static bool allocateModScratchBuffer(uint32_t *&buffer, size_t &bufferLen, size_t pxCount) {
+  if (pxCount == 0) return false;
+  if (buffer && bufferLen >= pxCount) return true;
+  p_free(buffer);
+  buffer = static_cast<uint32_t*>(allocate_buffer(pxCount * sizeof(uint32_t), BFRALLOC_ENFORCE_PSRAM | BFRALLOC_NOBYTEACCESS));
+  if (!buffer) {
+    bufferLen = 0;
+    return false;
+  }
+  bufferLen = pxCount;
+  return true;
+}
+// AI: end
+
+void Segment::clearMods() {
+  if (mods) {
+    for (uint8_t i = 0; i < modCnt; i++) p_free(mods[i].history);
+    p_free(mods);
+    mods = nullptr;
+  }
+  modCnt = 0;
+}
+
+void Segment::freeModBufs() {
+  if (!mods) return;
+  for (uint8_t i = 0; i < modCnt; i++) {
+    p_free(mods[i].history);
+    mods[i].history = nullptr;
+    mods[i].historyLen = 0;
+  }
+}
+
+bool Segment::allocMods(uint8_t count) {
+  if (count == 0) { clearMods(); return true; }
+  if (count > MOD_MAX_PER_SEG) count = MOD_MAX_PER_SEG;
+  SegMod *nm = static_cast<SegMod*>(allocate_buffer(count * sizeof(SegMod), BFRALLOC_PREFER_PSRAM | BFRALLOC_CLEAR));
+  if (!nm) return false;
+  clearMods();
+  mods = nm;
+  modCnt = count;
+  return true;
+}
+
+void Segment::copyMods(const Segment &orig) {
+  if (!orig.mods || orig.modCnt == 0) return;
+  SegMod *nm = static_cast<SegMod*>(allocate_buffer(orig.modCnt * sizeof(SegMod), BFRALLOC_PREFER_PSRAM));
+  if (!nm) return;
+  memcpy(nm, orig.mods, orig.modCnt * sizeof(SegMod));
+  for (uint8_t i = 0; i < orig.modCnt; i++) {
+    nm[i].history = nullptr;
+    nm[i].historyLen = 0;
+  }
+  mods = nm;
+  modCnt = orig.modCnt;
+}
+
+SegMod* Segment::findMod(uint8_t type, bool enabledOnly) const {
+  if (!mods) return nullptr;
+  for (uint8_t i = 0; i < modCnt; i++) {
+    if (mods[i].type == type && (!enabledOnly || (mods[i].flags & MOD_FLAG_ON))) return &mods[i];
+  }
+  return nullptr;
+}
+
+static bool allocateModHistory(SegMod &m, size_t pxCount, bool &fresh) {
+  fresh = false;
+  if (pxCount == 0) return false;
+  if (m.history && m.historyLen == pxCount) return true;
+  p_free(m.history);
+  m.history = static_cast<uint32_t*>(allocate_buffer(pxCount * sizeof(uint32_t), BFRALLOC_ENFORCE_PSRAM | BFRALLOC_NOBYTEACCESS));
+  if (!m.history) {
+    m.historyLen = 0;
+    return false;
+  }
+  m.historyLen = pxCount;
+  fresh = true;
+  return true;
+}
+
+void WS2812FX::freeAllModBufs() {
+  for (Segment &seg : _segments) seg.freeModBufs();
+  p_free(_modScratch);
+  _modScratch = nullptr;
+  _modScratchLen = 0;
+  p_free(_modTransformScratch);
+  _modTransformScratch = nullptr;
+  _modTransformScratchLen = 0;
+}
+
+// copy segment, formerly copy Segment FX
+void WS2812FX::runCopyMod(Segment &seg, size_t segIdx, const SegMod &m, bool liveStack) {
+  const uint32_t sourceid = m.p[0];
+  if (sourceid >= _segments.size() || (!liveStack && sourceid == segIdx)) {
+    seg.fadeToBlackBy(5);
+    return;
+  }
+  Segment &src = _segments[sourceid];
+  if (!src.isActive()) return;
+
+  seg.setDrawDimensions();
+
+  #ifndef WLED_DISABLE_2D
+  if (src.is2D()) {
+    const unsigned dstW = Segment::_vWidth;
+    const unsigned dstH = Segment::_vHeight;
+    unsigned srcW, srcH;
+    if (liveStack) {
+      srcW = src.width();
+      srcH = src.height();
+    } else {
+      src.setDrawDimensions();
+      srcW = Segment::_vWidth;
+      srcH = Segment::_vHeight;
+      seg.setDrawDimensions();
+    }
+    const bool axis = (m.flags & MOD_COPY_AXIS) != 0;
+    const unsigned reqW = axis ? dstH : dstW;
+    const unsigned reqH = axis ? dstW : dstH;
+    const int32_t offX = (m.flags & MOD_COPY_RIGHT)  ? ((int32_t)srcW - (int32_t)reqW) : 0;
+    const int32_t offY = (m.flags & MOD_COPY_BOTTOM) ? ((int32_t)srcH - (int32_t)reqH) : 0;
+    for (unsigned y = 0; y < dstH; y++) {
+      for (unsigned x = 0; x < dstW; x++) {
+        const int32_t sx = (int32_t)(axis ? y : x) + offX;
+        const int32_t sy = (int32_t)(axis ? x : y) + offY;
+        uint32_t color = 0;
+        if (sx >= 0 && sx < (int32_t)srcW && sy >= 0 && sy < (int32_t)srcH) {
+          if (liveStack) {
+            color = getPixelColorNoMap(((unsigned)sy + src.startY) * Segment::maxWidth + ((unsigned)sx + src.start));
+          } else {
+            src.setDrawDimensions();
+            color = src.getPixelColorXY((int)sx, (int)sy);
+            seg.setDrawDimensions();
+          }
+        }
+        seg.setPixelColorXY((int)x, (int)y, color);
+      }
+    }
+    return;
+  }
+  #endif
+
+  const int dstLen = Segment::_vLength;
+  const int srcLen = src.length();
+  const int32_t off1 = (m.flags & MOD_COPY_RIGHT) ? ((int32_t)srcLen - (int32_t)dstLen) : 0;
+  for (int i = 0; i < dstLen; i++) {
+    const int si = (int32_t)i + off1;
+    uint32_t color = 0;
+    if (si >= 0 && si < srcLen) {
+      if (liveStack) {
+        color = getPixelColorNoMap(si + src.start);
+      } else {
+        src.setDrawDimensions();
+        color = src.getPixelColor(si);
+        seg.setDrawDimensions();
+      }
+    }
+    seg.setPixelColor(i, color);
+  }
+}
+
+#ifndef WLED_DISABLE_2D
+static int32_t wrapGeoCoord(int32_t v, int32_t dim, uint8_t edge) {
+  if (edge == 1) {
+    v %= dim;
+    return (v < 0) ? (v + dim) : v;
+  }
+  if (edge == 2) {
+    int32_t t = (v >= 0) ? (v / dim) : ((v - dim + 1) / dim);
+    v -= t * dim;
+    return (t & 1) ? (dim - 1 - v) : v;
+  }
+  return v;
+}
+
+// rotate segment, original code credit @Brandon502, PR #5202
+static void applyRotateMod(uint32_t *buf, uint32_t base, uint32_t stride, uint32_t w, uint32_t h, SegMod &m, uint32_t dt, uint32_t *&scratch, size_t &scratchLen) {
+  if (w < 2 || h < 2) return;
+  if (m.p[0] > 0) {
+    if (dt > 0) {
+      const uint16_t step = (uint16_t)((dt * (uint32_t)m.p[0] * 321U) >> 10);
+      if (m.flags & MOD_ROT_CCW) m.state -= step;
+      else m.state += step;
+    }
+  } else {
+    m.state = 0;
+  }
+  const uint16_t deg = (uint16_t)((((uint32_t)m.state * 360U) >> 16) + (((uint32_t)m.p[1] * 360U) >> 8)) % 360U;
+  if (deg == 0) return;
+
+  if (!allocateModScratchBuffer(scratch, scratchLen, w * h)) return; // graceful OOM bypass
+
+  for (uint32_t y = 0; y < h; y++) {
+    memcpy(scratch + y * w, buf + base + y * stride, w * sizeof(uint32_t));
+  }
+
+  constexpr int32_t Fixed_Scale = 1024;
+  constexpr int32_t RoundVal = 512;
+  const bool flip = (deg > 90 && deg < 270);
+  const uint16_t shearDeg = flip ? (deg + 180U) % 360U : deg;
+  const float rad = radians((float)shearDeg);
+  const int32_t shearX = (int32_t)lroundf(-tanf(rad * 0.5f) * Fixed_Scale);
+  const int32_t shearY = (int32_t)lroundf(sinf(rad) * Fixed_Scale);
+
+  const int32_t cx2 = (int32_t)w - 1;
+  const int32_t cy2 = (int32_t)h - 1;
+  const uint8_t edge = (m.flags & MOD_GEO_EDGE_MASK) >> 2;
+
+  for (unsigned destY = 0; destY < h; destY++) {
+    uint32_t *dstRow = buf + base + (size_t)destY * stride;
+    const int32_t dy2 = 2 * (int32_t)destY - cy2;
+    for (unsigned destX = 0; destX < w; destX++) {
+      const int32_t dx2 = 2 * (int32_t)destX - cx2;
+      const int32_t x1 = dx2 - ((shearX * dy2 + RoundVal) >> 10);
+      const int32_t y0 = dy2 - ((shearY * x1 + RoundVal) >> 10);
+      const int32_t x0 = x1 - ((shearX * y0 + RoundVal) >> 10);
+
+      int32_t srcX = ((flip ? (cx2 - x0) : (cx2 + x0)) + 1) >> 1;
+      int32_t srcY = ((flip ? (cy2 - y0) : (cy2 + y0)) + 1) >> 1;
+
+      if (edge) {
+        srcX = wrapGeoCoord(srcX, (int32_t)w, edge);
+        srcY = wrapGeoCoord(srcY, (int32_t)h, edge);
+      } else if (srcX < 0 || srcX >= (int32_t)w || srcY < 0 || srcY >= (int32_t)h) {
+        dstRow[destX] = 0;
+        continue;
+      }
+      dstRow[destX] = scratch[(size_t)srcY * w + (size_t)srcX];
+    }
+  }
+}
+
+// zoom segment, original code credit @Brandon502, PR #5202
+static void applyZoomMod(uint32_t *buf, size_t base, unsigned stride, unsigned w, unsigned h, SegMod &m, unsigned dt,
+                         uint32_t *&scratch, size_t &scratchLen) {
+  if (w < 2 && h < 2) return;
+  uint8_t curVal = m.p[1]; // default static zoom uses Start slider
+  if (m.p[0] > 0) {
+    if (dt > 0) {
+      const uint16_t step = (uint16_t)(((uint32_t)dt * (uint32_t)m.p[0] * 160U) >> 8);
+      m.state += step;
+    }
+    const uint32_t t = (uint32_t)(32767 - (int32_t)cos16_t(m.state)); // 0 -> 65534 -> 0 smoothly
+    curVal = (uint8_t)((int32_t)m.p[1] + (((int32_t)m.p[2] - (int32_t)m.p[1]) * (int32_t)t) / 65534);
+  } else {
+    m.state = 0;
+  }
+  if (curVal == 128) return; // exact 1.0x identity
+
+  if (!allocateModScratchBuffer(scratch, scratchLen, (size_t)w * (size_t)h)) return; // graceful OOM bypass
+
+  for (unsigned y = 0; y < h; y++) {
+    memcpy(scratch + (size_t)y * w, buf + base + (size_t)y * stride, w * sizeof(uint32_t));
+  }
+
+  constexpr int32_t RoundVal = 512;
+  const int32_t zoomScale = (curVal >= 128)
+    ? (1024 + (((int32_t)curVal - 128) * 3072) / 127)
+    : (256 + ((int32_t)curVal * 768) / 128);
+  const int32_t invZoom = (1L << 20) / zoomScale;
+
+  const int32_t cx2 = (int32_t)w - 1;
+  const int32_t cy2 = (int32_t)h - 1;
+  const uint8_t edge = (m.flags & MOD_GEO_EDGE_MASK) >> 2;
+
+  for (unsigned destY = 0; destY < h; destY++) {
+    uint32_t *dstRow = buf + base + (size_t)destY * stride;
+    const int32_t sy0 = ((2 * (int32_t)destY - cy2) * invZoom + RoundVal) >> 10;
+    int32_t srcY = ((cy2 + sy0) + 1) >> 1;
+    if (edge) {
+      srcY = wrapGeoCoord(srcY, (int32_t)h, edge);
+    } else if (srcY < 0 || srcY >= (int32_t)h) {
+      memset(dstRow, 0, w * sizeof(uint32_t));
+      continue;
+    }
+    const uint32_t *srcRow = scratch + (size_t)srcY * w;
+    for (unsigned destX = 0; destX < w; destX++) {
+      const int32_t sx0 = ((2 * (int32_t)destX - cx2) * invZoom + RoundVal) >> 10;
+      int32_t srcX = ((cx2 + sx0) + 1) >> 1;
+      if (edge) {
+        srcX = wrapGeoCoord(srcX, (int32_t)w, edge);
+      } else if (srcX < 0 || srcX >= (int32_t)w) {
+        dstRow[destX] = 0;
+        continue;
+      }
+      dstRow[destX] = srcRow[srcX];
+    }
+  }
+}
+#endif
+
+void WS2812FX::applyModifiers(Segment &seg, bool stack, size_t diff, uint32_t *buf, size_t bufLen, bool &needsTransformScratch) {
+  if (!buf || !seg.mods || seg.modCnt == 0 || bufLen == 0) return;
+
+  const unsigned dt = (diff > 250U) ? 250U : diff;
+
+  #ifndef WLED_DISABLE_2D
+  const bool seg2D = stack
+    ? (isMatrix && seg.start < Segment::maxWidth && seg.stop <= Segment::maxWidth && seg.stopY <= Segment::maxHeight)
+    : seg.is2D();
+  const unsigned w = seg2D ? ((stack || !seg.transpose) ? seg.width() : seg.height()) : (stack ? (unsigned)(seg.stop - seg.start) : (unsigned)seg.length());
+  const unsigned h = seg2D ? ((stack || !seg.transpose) ? seg.height() : seg.width()) : 1U;
+  const unsigned stride = seg2D ? (stack ? (unsigned)Segment::maxWidth : w) : 1U;
+  const size_t base = stack ? (seg2D ? (seg.start + (size_t)seg.startY * Segment::maxWidth) : seg.start) : 0;
+  if (w == 0 || h == 0) return;
+  if (seg2D ? (base + (size_t)(h - 1) * stride + w > bufLen) : (base + w > bufLen)) return;
+  #else
+  constexpr bool seg2D = false;
+  const unsigned w = stack ? (unsigned)(seg.stop - seg.start) : (unsigned)seg.length();
+  const unsigned h = 1U;
+  const unsigned stride = 1U;
+  const size_t base = stack ? seg.start : 0;
+  if (w == 0 || base + w > bufLen) return;
+  #endif
+
+  for (uint8_t mi = 0; mi < seg.modCnt; mi++) {
+    SegMod &m = seg.mods[mi];
+    if (!(m.flags & MOD_FLAG_ON)) {
+      if (m.history) { p_free(m.history); m.history = nullptr; m.historyLen = 0; }
+      continue;
+    }
+    if (m.type == MOD_COPY || ((bool)(m.flags & MOD_FLAG_STACK) != stack)) continue;
+
+    switch (m.type) {
+      case MOD_COLOR: {
+        const int32_t bri = ((int32_t)m.p[0] - 128) * 2;
+        const int32_t hue = m.p[1];
+        const int32_t sat = ((int32_t)m.p[2] - 128) * 2;
+        if (hue == 0 && sat == 0 && bri == 0) break;
+        for (unsigned y = 0; y < h; y++) {
+          uint32_t *row = buf + base + (size_t)y * stride;
+          for (unsigned x = 0; x < w; x++) {
+            CRGBW c(row[x]);
+            adjust_color(c, hue, sat, bri);
+            row[x] = c.color32;
+          }
+        }
+        break;
+      }
+
+      #ifndef WLED_DISABLE_2D
+      case MOD_ROTATE:
+        if (seg2D) {
+          needsTransformScratch = true;
+          applyRotateMod(buf, base, stride, w, h, m, dt, _modTransformScratch, _modTransformScratchLen);
+        }
+        break;
+
+      case MOD_ZOOM:
+        if (seg2D) {
+          needsTransformScratch = true;
+          applyZoomMod(buf, base, stride, w, h, m, dt, _modTransformScratch, _modTransformScratchLen);
+        }
+        break;
+      #endif
+      // blur and temporal smoothing: based on original idea by @DanielWeigl PR #5988
+      case MOD_BLUR_X: {
+        if (m.p[0] == 0 || (w <= 1 && h <= 1)) break;
+        const uint8_t alpha = 248 - (((uint16_t)m.p[0] * 180U) >> 8);
+        const uint8_t bwdInit = ((255U - alpha) * 255U) / (510U - alpha);
+        const bool preBinom = m.p[0] > 48;
+        if (seg2D) {
+          const bool runH = (w > 1), runV = (h > 1);
+          if (runH) {
+            for (unsigned y = 0; y < h; y++)
+              blurGaussian(buf + base + (size_t)y * stride, w, 1, alpha, bwdInit, preBinom, true, !runV);
+          }
+          if (runV) {
+            for (unsigned x = 0; x < w; x++)
+              blurGaussian(buf + base + x, h, stride, alpha, bwdInit, preBinom, !runH, true);
+          }
+        } else {
+          blurGaussian(buf + base, w, 1, alpha, bwdInit, preBinom, true, true);
+        }
+        break;
+      }
+
+      case MOD_SMOOTH_T: {
+        if (m.p[0] == 0) {
+          if (m.history) { p_free(m.history); m.history = nullptr; m.historyLen = 0; }
+          break;
+        }
+        bool fresh = false;
+        if (!allocateModHistory(m, (size_t)w * (size_t)h, fresh)) break; // graceful OOM bypass
+        if (fresh) {
+          for (unsigned y = 0; y < h; y++)
+            memcpy(m.history + (size_t)y * w, buf + base + (size_t)y * stride, w * sizeof(uint32_t));
+          break;
+        }
+        const uint32_t tau = (uint32_t)m.p[0] * 4U; // time constant in ms
+        const uint8_t aT = dt ? (uint8_t)constrain((dt * 255U) / (tau + dt), 1U, 255U) : 1;
+        for (unsigned y = 0; y < h; y++) {
+          uint32_t *dstRow = buf + base + (size_t)y * stride;
+          uint32_t *bufRow = m.history + (size_t)y * w;
+          if (aT == 255) {
+            memcpy(bufRow, dstRow, w * sizeof(uint32_t));
+          } else {
+            for (unsigned x = 0; x < w; x++) {
+            //  const uint32_t c = smoothPx(bufRow[x], dstRow[x], aT);
+              const uint32_t c = color_blend_smooth(bufRow[x], dstRow[x], aT);
+              bufRow[x] = c;
+              dstRow[x] = c;
+            }
+          }
+        }
+        break;
+      }
+
+      default: break;
+    }
+  }
+}
+#endif
+// AI: end
+
 void WS2812FX::show() {
   #ifndef WLED_DISABLE_GLOBAL_PIXELBUFFER
   if (!_pixels) {
@@ -1946,11 +2448,72 @@ void WS2812FX::show() {
     #else
     // clear frame buffer
     memset(_pixels, 0, sizeof(uint32_t) * totalLen);
-    // blend all segments into (cleared) buffer
-    for (Segment &seg : _segments) if (seg.isActive() && (seg.on || seg.isInTransition())) {
+// AI: below section was generated by an AI
+#ifndef WLED_DISABLE_MODIFIERS
+    bool usedScratch = false;
+    bool needsTransformScratch = false;
+#endif
+    // blend all segments in z-order and apply segment modifiers inline
+    for (size_t i = 0; i < _segments.size(); i++) {
+      Segment &seg = _segments[i];
+      if (!seg.isActive() || (!seg.on && !seg.isInTransition())) {
+        seg.freeModBufs();
+        continue;
+      }
+#ifndef WLED_DISABLE_MODIFIERS
+      if (const SegMod *cm = seg.findMod(MOD_COPY, true)) {
+        if (cm->flags & MOD_FLAG_STACK) runCopyMod(seg, i, *cm, true);
+      }
+      bool hasLocalMods = false, hasStackMods = false;
+      if (seg.mods && seg.modCnt) {
+        for (uint8_t mi = 0; mi < seg.modCnt; mi++) {
+          if (!(seg.mods[mi].flags & MOD_FLAG_ON)) {
+            if (seg.mods[mi].history) {
+              p_free(seg.mods[mi].history);
+              seg.mods[mi].history = nullptr;
+              seg.mods[mi].historyLen = 0;
+            }
+            continue;
+          }
+          if (seg.mods[mi].type == MOD_COPY) continue;
+          if (seg.mods[mi].flags & MOD_FLAG_STACK) hasStackMods = true;
+          else hasLocalMods = true;
+        }
+      }
+      uint32_t *origPx = seg.pixels;
+      const size_t segLen = seg.length();
+      if (hasLocalMods && origPx && segLen > 0 && allocateModScratchBuffer(_modScratch, _modScratchLen, segLen)) {
+        usedScratch = true;
+        memcpy(_modScratch, origPx, segLen * sizeof(uint32_t));
+        applyModifiers(seg, false, diff, _modScratch, segLen, needsTransformScratch);
+        seg.pixels = _modScratch;
+      }
+#endif
       blendSegment(seg);              // blend segment's buffer into frame buffer
+#ifndef WLED_DISABLE_MODIFIERS
+      seg.pixels = origPx;
+      if (hasStackMods) applyModifiers(seg, true, diff, _pixels, totalLen, needsTransformScratch);
+#endif
     }
+#ifndef WLED_DISABLE_MODIFIERS
+    if (!usedScratch && _modScratch) {
+      p_free(_modScratch);
+      _modScratch = nullptr;
+      _modScratchLen = 0;
+    }
+    if (!needsTransformScratch && _modTransformScratch) {
+      p_free(_modTransformScratch);
+      _modTransformScratch = nullptr;
+      _modTransformScratchLen = 0;
+    }
+
+#endif
     #endif
+  } else {
+#ifndef WLED_DISABLE_MODIFIERS
+    freeAllModBufs();
+#endif
+  // AI: end
   }
 
   // Paint overlays in to pixel buffer

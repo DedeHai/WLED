@@ -19,13 +19,33 @@
  */
 uint32_t WLED_O2_ATTR IRAM_ATTR color_blend(uint32_t color1, uint32_t color2, uint8_t blend) {
   // min / max blend checking is omitted: calls with 0 or 255 are rare, checking lowers overall performance
-  const uint32_t TWO_CHANNEL_MASK = 0x00FF00FF;     // mask for R and B channels or W and G if negated (poorman's SIMD; https://github.com/wled/WLED/pull/4568#discussion_r1986587221)
+  constexpr uint32_t TWO_CHANNEL_MASK = 0x00FF00FF; // mask for R and B channels or W and G if negated (poorman's SIMD; https://github.com/wled/WLED/pull/4568#discussion_r1986587221)
   uint32_t rb1 =  color1       & TWO_CHANNEL_MASK;  // extract R & B channels from color1
   uint32_t wg1 = (color1 >> 8) & TWO_CHANNEL_MASK;  // extract W & G channels from color1 (shifted for multiplication later)
   uint32_t rb2 =  color2       & TWO_CHANNEL_MASK;  // extract R & B channels from color2
   uint32_t wg2 = (color2 >> 8) & TWO_CHANNEL_MASK;  // extract W & G channels from color2 (shifted for multiplication later)
-  uint32_t rb3 = ((((rb1 << 8) | rb2) + (rb2 * blend) - (rb1 * blend)) >> 8) &  TWO_CHANNEL_MASK; // blend red and blue
-  uint32_t wg3 = ((((wg1 << 8) | wg2) + (wg2 * blend) - (wg1 * blend)))      & ~TWO_CHANNEL_MASK; // negated mask for white and green
+  uint32_t rb3 = ((((rb1 << 8) | rb2) + (rb2 - rb1) * blend) >> 8) &  TWO_CHANNEL_MASK; // blend red and blue
+  uint32_t wg3 = (((wg1 << 8)  | wg2) + (wg2 - wg1) * blend)       & ~TWO_CHANNEL_MASK; // negated mask for white and green
+  return rb3 | wg3;
+}
+
+// same as color_blend, but it ensures a minimum step: use this to blend a color in multiple steps as it ensures the target is reached
+// note: do not call with blend = 0 if target needs to be reached in that case
+uint32_t WLED_O2_ATTR IRAM_ATTR color_blend_smooth(uint32_t color1, uint32_t color2, uint8_t blend) {
+  constexpr uint32_t TWO_CHANNEL_MASK = 0x00FF00FF;
+  constexpr uint32_t GUARD            = 0x01000100;   // bit 8 of each 16-bit lane
+
+  uint32_t rb1 =  color1       & TWO_CHANNEL_MASK;
+  uint32_t wg1 = (color1 >> 8) & TWO_CHANNEL_MASK;
+  uint32_t rb2 =  color2       & TWO_CHANNEL_MASK;
+  uint32_t wg2 = (color2 >> 8) & TWO_CHANNEL_MASK;
+
+  // per lane: 255 if target >= current, else 0 (floor -> ceil for rising channels)
+  uint32_t rbUp = ((rb2 | GUARD) - rb1) & GUARD;  rbUp -= rbUp >> 8;
+  uint32_t wgUp = ((wg2 | GUARD) - wg1) & GUARD;  wgUp -= wgUp >> 8;
+
+  uint32_t rb3 = (((rb1 << 8) + (rb2 - rb1) * blend + rbUp) >> 8) &  TWO_CHANNEL_MASK;
+  uint32_t wg3 = (((wg1 << 8) + (wg2 - wg1) * blend + wgUp))      & ~TWO_CHANNEL_MASK;
   return rb3 | wg3;
 }
 
@@ -703,17 +723,4 @@ void WLEDGamma::calcGammaTable(float gamma)
 {
   const GammaCurve curve(gamma);
   curve.fillTables(gammaT, gammaT_inv);
-}
-
-uint32_t WLEDGamma::inverseGamma32(uint32_t color)
-{
-  uint8_t w = W(color);
-  uint8_t r = R(color);
-  uint8_t g = G(color);
-  uint8_t b = B(color);
-  w = gammaT_inv[w];
-  r = gammaT_inv[r];
-  g = gammaT_inv[g];
-  b = gammaT_inv[b];
-  return RGBW32(r, g, b, w);
 }

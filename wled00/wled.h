@@ -129,6 +129,9 @@
 #endif
 
 #include "wled_boards.h"  // pull in board-specific capability defines
+#if defined(WLED_DISABLE_GLOBAL_PIXELBUFFER) && !defined(WLED_DISABLE_MODIFIERS)
+  #define WLED_DISABLE_MODIFIERS
+#endif
 
 #include <ESPAsyncWebServer.h>
 #include <WiFiUdp.h>

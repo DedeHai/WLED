@@ -1142,9 +1142,17 @@ textarea {
 }
 
 .del {
-	position: absolute;
-	bottom: 8px;
-	right: 8px;
+	display: flex;
+	justify-content: flex-end;
+	gap: 4px;
+	margin: 0;
+}
+
+.segtools {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-top: 12px;
 }
 
 .frz {
@@ -1475,6 +1483,58 @@ dialog {
 .presin {
 	padding: 8px;
 	position: relative;
+}
+.segin .sliderwrap {
+	width: 155px;
+	margin: 2px 0;
+}
+.modb {
+	padding: 6px 0;
+	margin: 6px 0;
+	text-align: left;
+}
+.modh {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	margin-bottom: 4px;
+}
+.modtitle {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+}
+.mod-en {
+	margin: 0;
+}
+.modhc {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
+.modc {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	cursor: pointer;
+}
+.modh .icons, .mod-ico {
+	font-size: 18px !important;
+	color: var(--c-d);
+}
+.modr {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 4px 8px;
+	margin: 2px 0;
+}
+.modr > .sliderwrap {
+	flex: 0 0 190px;
+	width: 190px;
+	max-width: 100%;
+	min-width: 0;
 }
 
 .presin {

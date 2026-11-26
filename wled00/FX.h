@@ -218,7 +218,7 @@ extern byte realtimeMode;           // used in getMappedPixelIndex()
 #define FX_MODE_LAKE                    75
 #define FX_MODE_METEOR                  76
 //#define FX_MODE_METEOR_SMOOTH           77  // replaced by Meteor
-#define FX_MODE_COPY                    77
+//#define FX_MODE_COPY                    77  // retired: replaced by MOD_COPY modifier
 #define FX_MODE_RAILWAY                 78
 #define FX_MODE_RIPPLE                  79
 #define FX_MODE_TWINKLEFOX              80
@@ -434,7 +434,41 @@ typedef enum mapping1D2D {
 class WS2812FX;
 class FontManager;
 
+// Blur len RGBW pixels in place, stepping stride uint32_t elements between pixels.
+// alpha, bwdInit, and preBinom configure the filter; gammaIn/gammaOut control color-space conversion.
+// Requires len >= 2 and a valid buffer.
+void blurGaussian(uint32_t *px, unsigned len, unsigned stride, uint8_t alpha, uint8_t bwdInit, bool preBinom, bool gammaIn, bool gammaOut);
+
 // segment, 76 bytes
+#ifndef WLED_DISABLE_MODIFIERS
+enum SegModType : uint8_t {
+  MOD_COPY     = 0,  // source-replacing: copy segment / live lower stack
+  MOD_COLOR    = 1,  // brightness / hue / saturation adjust
+  MOD_ROTATE   = 2,  // 2D animated/static 3-shear rotate
+  MOD_ZOOM     = 3,  // 2D animated/static zoom (sine between min & max)
+  MOD_BLUR_X   = 4,  // linear-light O(N) Gaussian-like blur
+  MOD_SMOOTH_T = 5,  // time-based EMA smoothing
+  MOD_COUNT
+};
+#define MOD_FLAG_ON        0x01
+#define MOD_FLAG_STACK     0x02
+#define MOD_COPY_AXIS      0x04
+#define MOD_COPY_RIGHT     0x08
+#define MOD_COPY_BOTTOM    0x10
+#define MOD_GEO_EDGE_MASK  0x0C
+#define MOD_ROT_CCW        0x10
+#define MOD_MAX_PER_SEG    8
+
+struct SegMod {
+  uint8_t   type;
+  uint8_t   flags;
+  uint8_t   p[3];
+  uint16_t  state;
+  uint32_t *history;
+  size_t    historyLen;
+};
+#endif
+
 class Segment {
   public:
     friend class FontManager; // Allow FontManager to access protected members
@@ -475,6 +509,10 @@ class Segment {
       bool    check2  : 1;        // checkmark 2
       bool    check3  : 1;        // checkmark 3
     };
+#ifndef WLED_DISABLE_MODIFIERS
+    SegMod   *mods;
+    uint8_t   modCnt;
+#endif
     uint8_t   blendMode;          // segment blending modes: top, bottom, add, subtract, difference, average, multiply, divide, lighten, darken, screen, overlay, hardlight, softlight, dodge, burn, stencil
     char     *name;               // segment name
 
@@ -600,6 +638,10 @@ class Segment {
     , check1(false)
     , check2(false)
     , check3(false)
+#ifndef WLED_DISABLE_MODIFIERS
+    , mods(nullptr)
+    , modCnt(0)
+#endif
     , blendMode(0)
     , name(nullptr)
     , step(0)
@@ -639,6 +681,7 @@ class Segment {
       #ifdef WLED_ENABLE_GIF
       endImagePlayback(this);
       #endif
+      clearMods();
       deallocateData();
       p_free(pixels);
     }
@@ -699,6 +742,17 @@ class Segment {
     inline uint16_t dataSize() const { return _dataLen; }
     bool allocateData(size_t len);  // allocates effect data buffer in heap and clears it
     void deallocateData();          // deallocates (frees) effect data buffer from heap
+#ifndef WLED_DISABLE_MODIFIERS
+    void clearMods();
+    void freeModBufs();
+    bool allocMods(uint8_t count);
+    void copyMods(const Segment &orig);
+    SegMod* findMod(uint8_t type, bool enabledOnly = false) const;
+    inline bool hasMod(uint8_t type, bool enabledOnly = false) const { return findMod(type, enabledOnly) != nullptr; }
+#else
+    inline void clearMods() {}
+    inline void freeModBufs() {}
+#endif
     inline static unsigned getUsedSegmentData()            { return Segment::_usedSegmentData; }
     /**
       * Flags that before the next effect is calculated,
@@ -867,6 +921,12 @@ class WS2812FX {
       // true private variables
       _pixels(nullptr),
       _pixelCCT(nullptr),
+#ifndef WLED_DISABLE_MODIFIERS
+      _modScratch(nullptr),
+      _modScratchLen(0),
+      _modTransformScratch(nullptr),
+      _modTransformScratchLen(0),
+#endif
       _suspend(false),
       _brightness16(DEFAULT_BRIGHTNESS << 8),
       _length(DEFAULT_LED_COUNT),
@@ -894,6 +954,10 @@ class WS2812FX {
     }
 
     ~WS2812FX() {
+#ifndef WLED_DISABLE_MODIFIERS
+      p_free(_modScratch);
+      p_free(_modTransformScratch);
+#endif
       p_free(_pixels);
       p_free(_pixelCCT); // just in case
       d_free(customMappingTable);
@@ -923,6 +987,11 @@ class WS2812FX {
       fixInvalidSegments(),                       // fixes incorrect segment configuration
       blendSegment(const Segment &topSegment) const,    // blends topSegment into pixels
       show(),                                     // initiates LED output
+#ifndef WLED_DISABLE_MODIFIERS
+      applyModifiers(Segment &seg, bool stack, size_t diff, uint32_t *buf, size_t bufLen, bool &needsTransformScratch),
+      runCopyMod(Segment &seg, size_t segIdx, const SegMod &m, bool liveStack),
+      freeAllModBufs(),
+#endif
       setTargetFps(unsigned fps),
       setupEffectData(),                          // add default effects to the list; defined in FX.cpp
       waitForIt();                                // wait until frame is over (service() has finished or time for 1 frame has passed)
@@ -1076,6 +1145,14 @@ class WS2812FX {
   private:
     uint32_t *_pixels;
     uint8_t  *_pixelCCT;
+#ifndef WLED_DISABLE_MODIFIERS
+// AI: below section was generated by an AI
+    uint32_t *_modScratch;
+    size_t    _modScratchLen;
+    uint32_t *_modTransformScratch;
+    size_t    _modTransformScratchLen;
+// AI: end
+#endif
     std::vector<Segment> _segments;
 
     volatile bool _suspend;
