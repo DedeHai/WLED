@@ -755,7 +755,7 @@ const MOD_DEF = [
 	{t:4, n:"Spatial Blur",    d:[16],        p:[{l:"Blur"}]},
 	{t:5, n:"Temporal Smooth", d:[2],         p:[{l:"Smoothing"}]}
 ];
-var segMods = {}, copyModOn = false;
+var segMods = {};
 
 function renderMods(s, isM2)
 {
@@ -771,15 +771,15 @@ function renderMods(s, isM2)
 		let d = MOD_DEF[m.t];
 		if (!d) return;
 		let stackControl = `<label class="modc" title="Full stack"><i class="icons">&#xe34b;</i><input type="checkbox" ${(m.f&2)?'checked':''} onchange="setModF(${s},${mi},2,this.checked)"></label>`;
-		h += `<div class="modb"><div class="modh"><span class="modtitle"><b>${d.n}</b><input class="mod-en" type="checkbox" title="Enable" ${(m.f&1)?'checked':''} onchange="tglModEn(${s},${mi})"></span><span class="modhc">`+
+		h += `<div class="modb"><div class="modh"><span class="modtitle"><b>${d.n}</b><input type="checkbox" title="Enable" ${(m.f&1)?'checked':''} onchange="tglModEn(${s},${mi})"></span><span class="modhc">`+
 			stackControl+
 			`<button class="btn btn-xs" title="Remove" onclick="delMod(${s},${mi})">&#215;</button></span></div>`;
 		if (m.t === 0) {
-			h += `<div class="modr"><span>Source</span><input class="segn" type="number" min="0" max="63" value="${m.p[0]||0}" onchange="setModP(${s},${mi},0,this.value)"></div>`;
+			h += `<div class="modr"><span>Source</span><input class="segn" type="number" min="0" max="${maxSeg-1}" value="${m.p[0]||0}" onchange="setModP(${s},${mi},0,this.value)"></div>`;
 			h += `<div class="modr">`+
-				(isM2 ? `<label><input type="checkbox" ${(m.f&4)?'checked':''} onchange="setModF(${s},${mi},4,this.checked)"> Swap axis</label>` : '')+
+				(isM ? `<label><input type="checkbox" ${(m.f&4)?'checked':''} onchange="setModF(${s},${mi},4,this.checked)"> Swap axis</label>` : '')+
 				`<label><input type="checkbox" ${(m.f&8)?'checked':''} onchange="setModF(${s},${mi},8,this.checked)"> Align right</label>`+
-				(isM2 ? `<label><input type="checkbox" ${(m.f&16)?'checked':''} onchange="setModF(${s},${mi},16,this.checked)"> Align bottom</label>` : '')+
+				(isM ? `<label><input type="checkbox" ${(m.f&16)?'checked':''} onchange="setModF(${s},${mi},16,this.checked)"> Align bottom</label>` : '')+
 				`</div>`;
 		} else {
 			(d.p || []).forEach((pd, k) => {
@@ -798,14 +798,14 @@ function renderMods(s, isM2)
 	return h + `</div>`;
 }
 
-function sendMods(s) { requestJson({"seg":{"id":s,"m":segMods[s]||[]}}); }
+function sendMods(s) { hideTooltip(); requestJson({"seg":{"id":s,"m":segMods[s]||[]}}); }
 function addMod(s, t) {
 	let d = MOD_DEF[t]; if (!d) return;
 	if (!segMods[s]) segMods[s] = [];
 	segMods[s].push({t:t, f:3, p:d.d.slice()});
 	sendMods(s);
 }
-function delMod(s, mi) { hideTooltip(); segMods[s].splice(mi, 1); sendMods(s); }
+function delMod(s, mi) { segMods[s].splice(mi, 1); sendMods(s); }
 function tglModEn(s, mi) { segMods[s][mi].f ^= 1; sendMods(s); }
 function setModP(s, mi, k, v) { segMods[s][mi].p[k] = Math.max(0, Math.min(255, parseInt(v)||0)); sendMods(s); }
 function setModF(s, mi, mask, on) { let m = segMods[s][mi]; m.f = on ? (m.f | mask) : (m.f & ~mask); sendMods(s); }
@@ -1363,10 +1363,6 @@ function updateUI()
 	gId('buttonSync').className = (syncSend) ? 'active':'';
 
 	updateSelectedFx();
-	gId('fxFind').classList.toggle('hide', copyModOn);
-	gId('fxlist').classList.toggle('hide', copyModOn);
-	gId('sliders').classList.toggle('hide', copyModOn);
-	gId('fxmod').classList.toggle('hide', !copyModOn);
 	updateSelectedPalette(selectedPal); // must be after updateSelectedFx() to un-hide color slots for * palettes
 
 	updateTrail(gId('sliderBri'));
@@ -1467,7 +1463,7 @@ function updateSelectedFx()
 		// Display selected effect name on button in simplified UI
 		let selectedNameOnlyAscii = selectedName.replace(/[^\x00-\x7F]/g, "");
 		if (simplifiedUI) {
-			gId("fxbtn").innerText = copyModOn ? "Modifier: Copy" : ("Effect: " + selectedNameOnlyAscii);
+			gId("fxbtn").innerText = "Effect: " + selectedNameOnlyAscii;
 		}
 
 		// hide 2D mapping and/or sound simulation options
@@ -1598,7 +1594,6 @@ function readState(s,command=false)
 		if (hasWhite || (!hasRGB && !hasWhite)) { cd[e].dataset.w = i.col[e][3]; }
 		setCSL(cd[e]);
 	}
-	copyModOn = Array.isArray(i.m) && i.m.some(m => m.t === 0 && (m.f & 1));
 	selectSlot(csel);
 	if (i.cct != null && i.cct>=0) gId("sliderA").value = i.cct;
 

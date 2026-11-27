@@ -1531,12 +1531,9 @@ void WS2812FX::service() {
         _currentSegment = &seg;             // set current segment for effect functions (SEGMENT & SEGENV)
         // workaround for on/off transition to respect blending style
 #ifndef WLED_DISABLE_MODIFIERS
-        const SegMod *cm = seg.findMod(MOD_COPY, true);
-        if (cm) {
-          if (!(cm->flags & MOD_FLAG_STACK)) runCopyMod(seg, i, *cm, false);
-        } else
+        if (!seg.hasMod(MOD_COPY, true))
 #endif
-        _mode[seg.mode]();                  // run new/current mode (needed for bri workaround)
+          _mode[seg.mode]();                // run new/current mode (needed for bri workaround)
         seg.call++;
         // if segment is in transition and no old segment exists we don't need to run the old mode
         // (blendSegments() takes care of On/Off transitions and clipping)
@@ -2125,14 +2122,25 @@ void WS2812FX::runCopyMod(Segment &seg, size_t segIdx, const SegMod &m, bool liv
   #endif
 
   const int dstLen = Segment::_vLength;
-  const int srcLen = src.length();
+  const int srcLen = liveStack ? (int)src.length() : (int)src.virtualLength();
   const int32_t off1 = (m.flags & MOD_COPY_RIGHT) ? ((int32_t)srcLen - (int32_t)dstLen) : 0;
+  #ifndef WLED_DISABLE_2D
+  const bool srcInMatrix = liveStack && isMatrix && src.start < Segment::maxWidth && src.stop <= Segment::maxWidth && src.stopY <= Segment::maxHeight;
+  const bool srcVert = srcInMatrix && src.width() == 1 && src.height() > 1;
+  #endif
   for (int i = 0; i < dstLen; i++) {
     const int si = (int32_t)i + off1;
     uint32_t color = 0;
     if (si >= 0 && si < srcLen) {
       if (liveStack) {
-        color = getPixelColorNoMap(si + src.start);
+        #ifndef WLED_DISABLE_2D
+        if (srcInMatrix) {
+          const unsigned sx = src.start + (srcVert ? 0U : (unsigned)si);
+          const unsigned sy = src.startY + (srcVert ? (unsigned)si : 0U);
+          color = getPixelColorNoMap(sy * Segment::maxWidth + sx);
+        } else
+        #endif
+          color = getPixelColorNoMap(si + src.start);
       } else {
         src.setDrawDimensions();
         color = src.getPixelColor(si);
@@ -2202,7 +2210,7 @@ static void applyRotateMod(uint32_t *buf, uint32_t base, uint32_t stride, uint32
       int32_t srcX = ((flip ? (cx2 - x0) : (cx2 + x0)) + 1) >> 1;
       int32_t srcY = ((flip ? (cy2 - y0) : (cy2 + y0)) + 1) >> 1;
 
-      if (edge) {
+      if (edge == 1 || edge == 2) {
         srcX = wrapGeoCoord(srcX, (int32_t)w, edge);
         srcY = wrapGeoCoord(srcY, (int32_t)h, edge);
       } else if (srcX < 0 || srcX >= (int32_t)w || srcY < 0 || srcY >= (int32_t)h) {
@@ -2251,7 +2259,7 @@ static void applyZoomMod(uint32_t *buf, size_t base, unsigned stride, unsigned w
     uint32_t *dstRow = buf + base + (size_t)destY * stride;
     const int32_t sy0 = ((2 * (int32_t)destY - cy2) * invZoom + RoundVal) >> 10;
     int32_t srcY = ((cy2 + sy0) + 1) >> 1;
-    if (edge) {
+    if (edge == 1 || edge == 2) {
       srcY = wrapGeoCoord(srcY, (int32_t)h, edge);
     } else if (srcY < 0 || srcY >= (int32_t)h) {
       memset(dstRow, 0, w * sizeof(uint32_t));
@@ -2261,7 +2269,7 @@ static void applyZoomMod(uint32_t *buf, size_t base, unsigned stride, unsigned w
     for (unsigned destX = 0; destX < w; destX++) {
       const int32_t sx0 = ((2 * (int32_t)destX - cx2) * invZoom + RoundVal) >> 10;
       int32_t srcX = ((cx2 + sx0) + 1) >> 1;
-      if (edge) {
+      if (edge == 1 || edge == 2) {
         srcX = wrapGeoCoord(srcX, (int32_t)w, edge);
       } else if (srcX < 0 || srcX >= (int32_t)w) {
         dstRow[destX] = 0;
@@ -2282,15 +2290,15 @@ void WS2812FX::applyModifiers(Segment &seg, bool stack, size_t diff, uint32_t *b
   const bool seg2D = stack
     ? (isMatrix && seg.start < Segment::maxWidth && seg.stop <= Segment::maxWidth && seg.stopY <= Segment::maxHeight)
     : seg.is2D();
-  const unsigned w = seg2D ? ((stack || !seg.transpose) ? seg.width() : seg.height()) : (stack ? (unsigned)(seg.stop - seg.start) : (unsigned)seg.length());
-  const unsigned h = seg2D ? ((stack || !seg.transpose) ? seg.height() : seg.width()) : 1U;
+  const unsigned w = seg2D ? (stack ? seg.width() : seg.virtualWidth()) : (stack ? (unsigned)(seg.stop - seg.start) : (unsigned)seg.virtualLength());
+  const unsigned h = seg2D ? (stack ? seg.height() : seg.virtualHeight()) : 1U;
   const unsigned stride = seg2D ? (stack ? (unsigned)Segment::maxWidth : w) : 1U;
   const size_t base = stack ? (seg2D ? (seg.start + (size_t)seg.startY * Segment::maxWidth) : seg.start) : 0;
   if (w == 0 || h == 0) return;
   if (seg2D ? (base + (size_t)(h - 1) * stride + w > bufLen) : (base + w > bufLen)) return;
   #else
   constexpr bool seg2D = false;
-  const unsigned w = stack ? (unsigned)(seg.stop - seg.start) : (unsigned)seg.length();
+  const unsigned w = stack ? (unsigned)(seg.stop - seg.start) : (unsigned)seg.virtualLength();
   const unsigned h = 1U;
   const unsigned stride = 1U;
   const size_t base = stack ? seg.start : 0;
@@ -2316,6 +2324,7 @@ void WS2812FX::applyModifiers(Segment &seg, bool stack, size_t diff, uint32_t *b
           for (unsigned x = 0; x < w; x++) {
             CRGBW c(row[x]);
             adjust_color(c, hue, sat, bri);
+            if (c.w && bri) c.w = (uint8_t)constrain((int32_t)c.w + bri, 0, 255);
             row[x] = c.color32;
           }
         }
@@ -2446,9 +2455,18 @@ void WS2812FX::show() {
       blendSegment(seg);
     }
     #else
+#ifndef WLED_DISABLE_MODIFIERS
+    // run Copy modifiers after all segment effects have rendered and before clearing _pixels
+    for (size_t i = 0; i < _segments.size(); i++) {
+      Segment &seg = _segments[i];
+      if (!seg.isActive() || seg.freeze || (!seg.on && !seg.isInTransition())) continue;
+      if (const SegMod *cm = seg.findMod(MOD_COPY, true)) {
+        runCopyMod(seg, i, *cm, (cm->flags & MOD_FLAG_STACK) != 0);
+      }
+    }
+#endif
     // clear frame buffer
     memset(_pixels, 0, sizeof(uint32_t) * totalLen);
-// AI: below section was generated by an AI
 #ifndef WLED_DISABLE_MODIFIERS
     bool usedScratch = false;
     bool needsTransformScratch = false;
@@ -2461,9 +2479,6 @@ void WS2812FX::show() {
         continue;
       }
 #ifndef WLED_DISABLE_MODIFIERS
-      if (const SegMod *cm = seg.findMod(MOD_COPY, true)) {
-        if (cm->flags & MOD_FLAG_STACK) runCopyMod(seg, i, *cm, true);
-      }
       bool hasLocalMods = false, hasStackMods = false;
       if (seg.mods && seg.modCnt) {
         for (uint8_t mi = 0; mi < seg.modCnt; mi++) {
@@ -2481,7 +2496,7 @@ void WS2812FX::show() {
         }
       }
       uint32_t *origPx = seg.pixels;
-      const size_t segLen = seg.length();
+      const size_t segLen = seg.virtualLength();
       if (hasLocalMods && origPx && segLen > 0 && allocateModScratchBuffer(_modScratch, _modScratchLen, segLen)) {
         usedScratch = true;
         memcpy(_modScratch, origPx, segLen * sizeof(uint32_t));

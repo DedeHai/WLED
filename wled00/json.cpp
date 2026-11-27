@@ -347,14 +347,16 @@ static bool deserializeSegment(JsonObject elem, byte it, byte presetId = 0)
       uint8_t idx = 0;
       for (JsonObject mo : mArr) {
         if (idx >= cnt) break;
-        uint8_t t = mo["t"] | 0;
+        if (!mo.containsKey("t")) continue;
+        uint8_t t = mo["t"] | 255;
         if (t >= MOD_COUNT) continue;
         SegMod &dst = seg.mods[idx++];
         dst.type  = t;
         dst.flags = mo.containsKey("f") ? (mo["f"] | MOD_FLAG_ON) : (MOD_FLAG_ON | MOD_FLAG_STACK);
         JsonArray pa = mo["p"];
         for (uint8_t k = 0; k < 3; k++) {
-          dst.p[k] = (!pa.isNull() && k < pa.size()) ? pa[k].as<uint8_t>() : 0;
+          uint8_t def = ((t == MOD_COLOR && k != 1) || (t == MOD_ZOOM && k != 0)) ? 128 : 0;
+          dst.p[k] = (!pa.isNull() && k < pa.size()) ? pa[k].as<uint8_t>() : def;
         }
         if (oldMods) {
           for (uint8_t j = 0; j < oldCnt; j++) {
